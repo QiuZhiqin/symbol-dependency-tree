@@ -1,0 +1,12 @@
+{
+  "folders": [
+    {
+      "name": "primary-cpp",
+      "path": "cpp"
+    },
+    {
+      "name": "secondary-c",
+      "path": "secondary"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+.codegraph/**
+.github/**
+.vscode/**
+src/**
+test/**
+out-test/**
+plan.txt
+tsconfig*.json
+eslint.config.mjs
+vitest.config.ts
+node_modules/**
+**/*.map

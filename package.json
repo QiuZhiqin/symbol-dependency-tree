@@ -1,0 +1,160 @@
+{
+  "name": "symbol-dependency-tree",
+  "displayName": "C/C++ Symbol Reference Tree",
+  "description": "Explore indexed C/C++ callers as a horizontal VS Code graph.",
+  "version": "0.6.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "c",
+    "cpp",
+    "callers",
+    "call index",
+    "tree"
+  ],
+  "activationEvents": [
+    "onView:symbolDependencyTree.view",
+    "onCommand:symbolDependencyTree.show",
+    "onCommand:symbolDependencyTree.rebuildIndex"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "symbolDependencyTreeContainer",
+          "title": "Symbol References",
+          "icon": "resources/reference-tree.svg"
+        }
+      ]
+    },
+    "views": {
+      "symbolDependencyTreeContainer": [
+        {
+          "id": "symbolDependencyTree.view",
+          "name": "Symbol References",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "symbolDependencyTree.show",
+        "title": "Generate Symbol Reference Tree",
+        "icon": "$(references)"
+      },
+      {
+        "command": "symbolDependencyTree.refresh",
+        "title": "Refresh Symbol Reference Tree",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "symbolDependencyTree.clear",
+        "title": "Clear Symbol Reference Tree",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "symbolDependencyTree.collapseAll",
+        "title": "Collapse All",
+        "icon": "$(collapse-all)"
+      },
+      {
+        "command": "symbolDependencyTree.openReference",
+        "title": "Open Reference"
+      },
+      {
+        "command": "symbolDependencyTree.rebuildIndex",
+        "title": "Rebuild C/C++ Call Index",
+        "icon": "$(database)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "symbolDependencyTree.show",
+          "when": "editorLangId == c || editorLangId == cpp || editorLangId == cuda-cpp || editorLangId == objective-c || editorLangId == objective-cpp",
+          "group": "navigation@50"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "symbolDependencyTree.refresh",
+          "when": "view == symbolDependencyTree.view",
+          "group": "navigation@10"
+        },
+        {
+          "command": "symbolDependencyTree.collapseAll",
+          "when": "view == symbolDependencyTree.view",
+          "group": "navigation@20"
+        },
+        {
+          "command": "symbolDependencyTree.clear",
+          "when": "view == symbolDependencyTree.view",
+          "group": "navigation@30"
+        },
+        {
+          "command": "symbolDependencyTree.rebuildIndex",
+          "when": "view == symbolDependencyTree.view",
+          "group": "navigation@40"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Symbol Dependency Tree",
+      "properties": {
+        "symbolDependencyTree.persistentIndex.fileExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            ".c",
+            ".cc",
+            ".cpp",
+            ".cxx",
+            ".h",
+            ".hh",
+            ".hpp",
+            ".hxx",
+            ".inl",
+            ".ipp"
+          ],
+          "description": "File extensions stored in the persistent caller index."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
+    "compile": "npm run clean && tsc -p .",
+    "compile:integration": "tsc -p tsconfig.integration.json",
+    "watch": "tsc -w -p .",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
+    "test": "vitest run",
+    "test:integration": "npm run compile && npm run compile:integration && node out-test/runTest.js",
+    "check": "npm run compile && npm run lint && npm test",
+    "verify": "npm run check && npm run test:integration && npm run package",
+    "package": "npm run compile && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.15.0",
+    "@types/vscode": "^1.95.0",
+    "@typescript-eslint/eslint-plugin": "^8.31.0",
+    "@typescript-eslint/parser": "^8.31.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.5.0",
+    "eslint": "^9.25.0",
+    "mocha": "^11.2.2",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.31.0",
+    "vitest": "^3.1.2"
+  }
+}

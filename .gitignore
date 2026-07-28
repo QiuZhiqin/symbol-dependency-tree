@@ -1,0 +1,7 @@
+node_modules/
+out/
+out-test/
+*.vsix
+.vscode-test/
+coverage/
+.symbol-dependency-tree/

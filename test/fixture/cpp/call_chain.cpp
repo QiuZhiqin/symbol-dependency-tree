@@ -1,0 +1,38 @@
+#include "call_chain.hpp"
+
+int global_total = 0;
+static int file_total = 0;
+
+void Counter::increment() {
+  value += 1;
+  global_total += value;
+}
+
+int leaf(int input) {
+  int local_total = APPLY_TWICE(input);
+  global_total += local_total;
+  return local_total;
+}
+
+int middle(int input) {
+  const int first = leaf(input);
+  const int second = leaf(input + 1);
+  return first + second;
+}
+
+int entry(int input) {
+  file_total += middle(input);
+  return file_total;
+}
+
+int recursive_a(int input) {
+  return input <= 0 ? 0 : recursive_b(input - 1);
+}
+
+int recursive_b(int input) {
+  return input <= 0 ? 0 : recursive_a(input - 1);
+}
+
+// leaf(input) is not a reference.
+const char* ignored_text = "middle(input) is not a reference";
+const char* ignored_raw = R"cpp(entry(input) is not a reference)cpp";
