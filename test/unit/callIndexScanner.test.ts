@@ -116,6 +116,53 @@ describe("persistent call-index scanner", () => {
     ]);
   });
 
+  it("does not treat macro comparisons in conditions as local declarations", () => {
+    const source = `
+#define VS_SUB_TYPE_TOPO_DETECTION 0
+#define VENDOR_SPECIFIC 4
+
+int parse_cmdu_message(unsigned char vendor_mtype, unsigned short mtype)
+{
+  if (vendor_mtype == VS_SUB_TYPE_TOPO_DETECTION) {
+    consume(vendor_mtype);
+  }
+  if (mtype != VENDOR_SPECIFIC ||
+      vendor_mtype != VS_SUB_TYPE_TOPO_DETECTION)
+    return -1;
+  return 0;
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const references = indexed.calls.filter(
+      (call) => call.callee === "VS_SUB_TYPE_TOPO_DETECTION"
+    );
+
+    expect(references).toHaveLength(2);
+    expect(
+      references.map((reference) => ({
+        caller: reference.callerName,
+        kind: reference.kind,
+        scope: reference.scope
+      }))
+    ).toEqual([
+      {
+        caller: "parse_cmdu_message",
+        kind: "symbol",
+        scope: undefined
+      },
+      {
+        caller: "parse_cmdu_message",
+        kind: "symbol",
+        scope: undefined
+      }
+    ]);
+    expect(
+      indexed.declarations.some(
+        (declaration) => declaration.name === "VS_SUB_TYPE_TOPO_DETECTION"
+      )
+    ).toBe(false);
+  });
+
   it("binds same-named local variables to their declaring function and block", () => {
     const source = `
 int first(void)

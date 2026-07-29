@@ -527,17 +527,17 @@ export class SymbolDependencyGraphViewProvider
   <style nonce="${scriptNonce}">
     :root { color-scheme: light dark; }
     * { box-sizing: border-box; }
-    body { margin: 0; overflow: hidden; color: var(--vscode-foreground); background: var(--vscode-editor-background); font: 12px var(--vscode-font-family); }
+    body { margin: 0; height: 100vh; overflow: hidden; display: flex; flex-direction: column; color: var(--vscode-foreground); background: var(--vscode-editor-background); font: 12px var(--vscode-font-family); }
     button { font: inherit; }
-    #tabs { position: absolute; inset: 0 0 auto 0; height: 34px; display: flex; align-items: stretch; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background); }
-    .tab { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 10px; border: 0; border-right: 1px solid var(--vscode-panel-border); color: var(--vscode-tab-inactiveForeground); background: var(--vscode-tab-inactiveBackground); cursor: pointer; }
+    #tabs { flex: 0 0 auto; min-height: 34px; display: flex; flex-wrap: wrap; align-content: flex-start; overflow: hidden; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background); }
+    .tab { flex: 0 0 auto; height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 10px; border: 0; border-right: 1px solid var(--vscode-panel-border); color: var(--vscode-tab-inactiveForeground); background: var(--vscode-tab-inactiveBackground); cursor: pointer; }
     .tab:hover { color: var(--vscode-tab-activeForeground); background: var(--vscode-tab-hoverBackground); }
     .tab.active { color: var(--vscode-tab-activeForeground); background: var(--vscode-tab-activeBackground); box-shadow: inset 0 2px var(--vscode-tab-activeBorderTop, var(--vscode-focusBorder)); }
     .tab-label { white-space: nowrap; }
     .tab-close { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 3px; color: inherit; background: transparent; cursor: pointer; }
     .tab-close:hover { background: var(--vscode-toolbar-hoverBackground); }
-    #viewport { position: absolute; inset: 34px 0 0; overflow: hidden; cursor: grab; user-select: none; }
-    #viewport.dragging { cursor: grabbing; }
+    #viewport { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; cursor: default; user-select: none; }
+    #viewport.dragging { cursor: default; }
     #world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
     #edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
     .edge { fill: none; stroke: var(--vscode-editorWidget-border); stroke-width: 1.5; }
@@ -548,24 +548,26 @@ export class SymbolDependencyGraphViewProvider
     .node.root { border-left: 4px solid var(--vscode-focusBorder); }
     .node.cycle { border-color: var(--vscode-charts-orange); }
     .node-main { padding: 8px 10px; min-height: 34px; }
-    .node.expandable .node-main { padding-right: 38px; }
+    .node.expandable .node-main { padding-right: 10px; }
     .node-title { font-weight: 600; font-size: 13px; line-height: 18px; white-space: nowrap; cursor: pointer; }
     .node-title:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
     .line-links { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 6px; }
     .line-link { height: 21px; padding: 1px 7px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 4px; color: var(--vscode-textLink-foreground); background: var(--vscode-textCodeBlock-background); cursor: pointer; }
     .line-link:hover { color: var(--vscode-textLink-activeForeground); background: var(--vscode-list-hoverBackground); }
-    .expand { position: absolute; right: 8px; top: 7px; width: 21px; height: 21px; padding: 0; border: 1px solid var(--vscode-button-border, transparent); border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; }
+    .expand { position: absolute; right: -15px; top: 50%; width: 12px; height: 12px; padding: 0; z-index: 2; display: flex; align-items: center; justify-content: center; transform: translateY(-50%); border: 1px solid var(--vscode-button-border, transparent); border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font-size: 9px; line-height: 1; cursor: pointer; }
     .expand:hover { background: var(--vscode-button-hoverBackground); }
     .expand.loading { animation: pulse 1s infinite alternate; }
     @keyframes pulse { from { opacity: .45; } to { opacity: 1; } }
-    #status { position: absolute; inset: 34px 0 0; display: grid; place-content: center; text-align: center; color: var(--vscode-descriptionForeground); pointer-events: none; }
+    #status { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; color: var(--vscode-descriptionForeground); pointer-events: none; }
     #status strong { color: var(--vscode-foreground); font-size: 13px; }
   </style>
 </head>
 <body>
   <div id="tabs"></div>
-  <div id="viewport"><div id="world"><svg id="edges"></svg><div id="nodes"></div></div></div>
-  <div id="status"></div>
+  <div id="viewport">
+    <div id="world"><svg id="edges"></svg><div id="nodes"></div></div>
+    <div id="status"></div>
+  </div>
   <script nonce="${scriptNonce}">
     const vscode = acquireVsCodeApi();
     const tabsLayer = document.getElementById('tabs');
@@ -577,8 +579,10 @@ export class SymbolDependencyGraphViewProvider
     let tabs = [];
     let activeTabId;
     let graph = { nodes: [] };
-    let panX = 30;
-    let panY = 30;
+    const INITIAL_PAN_X = 0;
+    const INITIAL_PAN_Y = 30;
+    let panX = INITIAL_PAN_X;
+    let panY = INITIAL_PAN_Y;
     let worldWidth = 1;
     let worldHeight = 1;
     const COLUMN_GAP = 110;
@@ -737,9 +741,9 @@ export class SymbolDependencyGraphViewProvider
         graph.nodes,
         sizes,
         {
-          left: 45,
+          left: 0,
           top: 35,
-          right: 45,
+          right: 0,
           bottom: 35,
           columnGap: COLUMN_GAP,
           rowGap: ROW_GAP
@@ -806,11 +810,11 @@ export class SymbolDependencyGraphViewProvider
       graph = event.data.state;
       const saved = activeTabId ? viewPositions.get(activeTabId) : undefined;
       if (activeTabId !== previousTabId) {
-        panX = saved?.panX ?? 30;
-        panY = saved?.panY ?? 30;
+        panX = saved?.panX ?? INITIAL_PAN_X;
+        panY = saved?.panY ?? INITIAL_PAN_Y;
       } else if (graph.rootId !== previousRoot) {
-        panX = 30;
-        panY = 30;
+        panX = INITIAL_PAN_X;
+        panY = INITIAL_PAN_Y;
       }
       renderTabs();
       render();

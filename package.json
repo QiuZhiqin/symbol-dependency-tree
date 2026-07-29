@@ -2,7 +2,7 @@
   "name": "symbol-dependency-tree",
   "displayName": "C/C++ Symbol Reference Tree",
   "description": "Explore indexed C/C++ callers as a horizontal VS Code graph.",
-  "version": "0.8.2",
+  "version": "0.8.7",
   "publisher": "local",
   "license": "MIT",
   "engines": {

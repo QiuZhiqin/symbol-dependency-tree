@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.8.7
+
+- Keep the default arrow cursor over the graph canvas while using the pointer cursor for clickable function names, line links, tabs, and expand/collapse controls.
+- Keep equality and inequality comparisons from being misidentified as local declarations.
+- Rebuild version 10 of the persistent database so corrected macro references are indexed automatically.
+
+## 0.8.6
+
+- Reduce graph expand/collapse controls from 16 px to 12 px.
+- Place expand/collapse controls outside the right edge of each node and vertically center them.
+- Remove the node's internal padding that was reserved for the controls.
+
+## 0.8.5
+
+- Remove the graph's initial 30 px horizontal pan offset.
+- Remove the extra 45 px left and right graph-layout padding so content can reach the panel edges.
+
+## 0.8.4
+
+- Reduce the graph node expand/collapse controls from 21 px to 16 px.
+- Wrap graph tabs onto additional rows when the title bar is full.
+- Keep the graph viewport and empty-state message below the dynamically sized tab bar.
+
+## 0.8.3
+
+- Store the persistent call index as gzip-compressed JSON instead of plain JSON.
+- Reduce the measured 415,936,757-byte production index to about 33 MB without dropping any indexed symbols or scope data.
+- Read compatible legacy `.json` indexes, migrate them to `.json.gz`, and remove the old cache only after the compressed file is written successfully.
+
 ## 0.8.2
 
 - Make `struct`, `class`, `union`, and `enum` definitions queryable index roots.

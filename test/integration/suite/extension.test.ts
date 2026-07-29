@@ -209,13 +209,29 @@ suite("Symbol Dependency Tree integration", () => {
       ".symbol-dependency-tree"
     );
     const indexEntries = await vscode.workspace.fs.readDirectory(indexDirectory);
+    const compressedIndex = indexEntries.find(
+      ([name, type]) =>
+        type === vscode.FileType.File &&
+        /^call-index-[a-f0-9]{20}\.json\.gz$/u.test(name)
+    );
     assert.ok(
-      indexEntries.some(
-        ([name, type]) =>
-          type === vscode.FileType.File &&
-          /^call-index-[a-f0-9]{20}\.json$/u.test(name)
+      compressedIndex,
+      `No compressed workspace-local index database was written to ${indexDirectory.toString()}`
+    );
+    const compressedBytes = await vscode.workspace.fs.readFile(
+      vscode.Uri.joinPath(indexDirectory, compressedIndex[0])
+    );
+    assert.deepEqual(
+      [...compressedBytes.slice(0, 2)],
+      [0x1f, 0x8b],
+      "Persistent index does not have a gzip header"
+    );
+    assert.equal(
+      indexEntries.some(([name]) =>
+        /^call-index-[a-f0-9]{20}\.json$/u.test(name)
       ),
-      `No workspace-local index database was written to ${indexDirectory.toString()}`
+      false,
+      "Legacy uncompressed index was not removed"
     );
     for (const additionalFolder of vscode.workspace.workspaceFolders?.slice(1) ?? []) {
       assert.equal(

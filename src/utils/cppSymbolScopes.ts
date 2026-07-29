@@ -411,7 +411,21 @@ function hasTopLevelExpressionOperator(
       parenDepth === 0 &&
       bracketDepth === 0 &&
       angleDepth === 0 &&
-      ["=", ".", "->", "+", "-", "/", "?", "++", "--"].includes(text ?? "")
+      [
+        "=",
+        "==",
+        "!=",
+        "<=",
+        ">=",
+        ".",
+        "->",
+        "+",
+        "-",
+        "/",
+        "?",
+        "++",
+        "--"
+      ].includes(text ?? "")
     ) {
       return true;
     }

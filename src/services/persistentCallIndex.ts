@@ -14,10 +14,14 @@ import type {
   IndexedMemberOwnerPath,
   IndexedSymbolScope
 } from "../utils/cppSymbolScopes";
+import {
+  decodeCompressedOrPlainJson,
+  encodeCompressedJson
+} from "../utils/compressedJson";
 import { buildExcludeGlob, buildExtensionGlob } from "../utils/exclusions";
 import { shortSymbolName } from "../utils/symbolNames";
 
-const databaseVersion = 9;
+const databaseVersion = 10;
 const updateConcurrency = 12;
 
 interface StoredCallSite {
@@ -440,12 +444,30 @@ export class PersistentCallIndex implements vscode.Disposable {
       : vscode.Uri.joinPath(firstWorkspaceFolder.uri, ".symbol-dependency-tree");
   }
 
-  private databaseUri(directory = this.databaseDirectoryUri()): vscode.Uri {
+  private databaseUri(
+    directory = this.databaseDirectoryUri(),
+    compressed = true
+  ): vscode.Uri {
     const digest = createHash("sha256")
       .update(workspaceIdentity())
       .digest("hex")
       .slice(0, 20);
-    return vscode.Uri.joinPath(directory, `call-index-${digest}.json`);
+    return vscode.Uri.joinPath(
+      directory,
+      `call-index-${digest}.${compressed ? "json.gz" : "json"}`
+    );
+  }
+
+  private databaseCandidateUris(): readonly vscode.Uri[] {
+    const values = [
+      this.databaseUri(),
+      this.databaseUri(this.databaseDirectoryUri(), false),
+      this.databaseUri(this.fallbackStorageUri),
+      this.databaseUri(this.fallbackStorageUri, false)
+    ];
+    return [
+      ...new Map(values.map((uri) => [uri.toString(), uri])).values()
+    ];
   }
 
   private async loadOrBuild(token: vscode.CancellationToken): Promise<void> {
@@ -462,41 +484,44 @@ export class PersistentCallIndex implements vscode.Disposable {
     this.setStatus({ phase: "loading", stats: this.stats() });
     this.loaded = true;
     const databaseUri = this.databaseUri();
-    const legacyDatabaseUri = this.databaseUri(this.fallbackStorageUri);
-    let sourceUri = databaseUri;
-    let migrated = false;
-    try {
-      let bytes: Uint8Array;
+    let sourceUri: vscode.Uri | undefined;
+    let persisted: PersistedCallIndex | undefined;
+    for (const candidate of this.databaseCandidateUris()) {
       try {
-        bytes = await vscode.workspace.fs.readFile(databaseUri);
-      } catch {
-        if (databaseUri.toString() === legacyDatabaseUri.toString()) {
-          return false;
+        const bytes = await vscode.workspace.fs.readFile(candidate);
+        const decoded = await decodeCompressedOrPlainJson<PersistedCallIndex>(bytes);
+        if (decoded.version !== databaseVersion) {
+          continue;
         }
-        bytes = await vscode.workspace.fs.readFile(legacyDatabaseUri);
-        sourceUri = legacyDatabaseUri;
-        migrated = true;
+        sourceUri = candidate;
+        persisted = decoded;
+        break;
+      } catch {
+        // Try the next workspace/global and compressed/plain candidate.
       }
-      const persisted = JSON.parse(Buffer.from(bytes).toString("utf8")) as PersistedCallIndex;
-      if (persisted.version !== databaseVersion) {
-        return false;
-      }
+    }
+    if (sourceUri === undefined || persisted === undefined) {
+      return false;
+    }
+    try {
       for (const file of persisted.files) {
         this.files.set(file.uri, file);
       }
       this.rebuildLookup();
       this.databaseAvailable = true;
-      if (migrated) {
+      if (sourceUri.toString() !== databaseUri.toString()) {
         try {
           await this.save();
           this.output.appendLine(
-            `Persistent symbol index copied into the first workspace folder: ${databaseUri.toString()}`
+            `Persistent symbol index migrated to compressed workspace storage: ${databaseUri.toString()}`
           );
         } catch (error) {
           this.output.appendLine(
-            `Unable to copy the legacy symbol index into the workspace: ${String(error)}`
+            `Unable to migrate the legacy symbol index: ${String(error)}`
           );
         }
+      } else {
+        await this.removeLegacyDatabaseFiles();
       }
       const stats = this.stats();
       this.setStatus({ phase: "ready", stats });
@@ -504,8 +529,8 @@ export class PersistentCallIndex implements vscode.Disposable {
         `Persistent call index loaded from ${sourceUri.toString()}: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls`
       );
       return true;
-    } catch {
-      // The first run has no database yet.
+    } catch (error) {
+      this.output.appendLine(`Unable to load the persistent call index: ${String(error)}`);
       return false;
     }
   }
@@ -668,11 +693,31 @@ export class PersistentCallIndex implements vscode.Disposable {
       version: databaseVersion,
       files: [...this.files.values()]
     };
+    const encoded = await encodeCompressedJson(persisted);
     await vscode.workspace.fs.writeFile(
       this.databaseUri(),
-      Buffer.from(JSON.stringify(persisted), "utf8")
+      encoded.bytes
     );
+    await this.removeLegacyDatabaseFiles();
     this.databaseAvailable = true;
+    this.output.appendLine(
+      `Persistent call index compressed: ${encoded.uncompressedBytes} -> ${encoded.bytes.byteLength} bytes`
+    );
+  }
+
+  private async removeLegacyDatabaseFiles(): Promise<void> {
+    const active = this.databaseUri().toString();
+    for (const uri of this.databaseCandidateUris()) {
+      if (uri.toString() === active) {
+        continue;
+      }
+      try {
+        await vscode.workspace.fs.delete(uri);
+        this.output.appendLine(`Removed legacy symbol index: ${uri.toString()}`);
+      } catch {
+        // Missing or inaccessible legacy files need no cleanup.
+      }
+    }
   }
 
   private scheduleUpdate(uri: vscode.Uri): void {
