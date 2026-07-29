@@ -526,11 +526,13 @@ export class SymbolDependencyGraphViewProvider
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'nonce-${scriptNonce}'; script-src 'nonce-${scriptNonce}';">
   <style nonce="${scriptNonce}">
     :root { color-scheme: light dark; }
+    html { margin: 0; padding: 0; }
     * { box-sizing: border-box; }
-    body { margin: 0; height: 100vh; overflow: hidden; display: flex; flex-direction: column; color: var(--vscode-foreground); background: var(--vscode-editor-background); font: 12px var(--vscode-font-family); }
+    body { margin: 0; padding: 0; height: 100vh; overflow: hidden; display: flex; flex-direction: column; color: var(--vscode-foreground); background: var(--vscode-editor-background); font: 12px var(--vscode-font-family); }
     button { font: inherit; }
-    #tabs { flex: 0 0 auto; min-height: 34px; display: flex; flex-wrap: wrap; align-content: flex-start; overflow: hidden; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background); }
+    #tabs { flex: 0 0 auto; min-height: 34px; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-content: flex-start; justify-content: flex-start; overflow: hidden; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-panel-background); }
     .tab { flex: 0 0 auto; height: 34px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 10px; border: 0; border-right: 1px solid var(--vscode-panel-border); color: var(--vscode-tab-inactiveForeground); background: var(--vscode-tab-inactiveBackground); cursor: pointer; }
+    .tab:first-child { margin-left: 0; padding-left: 6px; }
     .tab:hover { color: var(--vscode-tab-activeForeground); background: var(--vscode-tab-hoverBackground); }
     .tab.active { color: var(--vscode-tab-activeForeground); background: var(--vscode-tab-activeBackground); box-shadow: inset 0 2px var(--vscode-tab-activeBorderTop, var(--vscode-focusBorder)); }
     .tab-label { white-space: nowrap; }

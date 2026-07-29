@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.0
+
+- Store version 11 snapshots with lossless string interning, numeric enums, tuple records, and exact delta-coded source offsets.
+- Persist ordinary file changes in a compact delta journal and atomically compact it into the base snapshot only after size or entry thresholds are reached.
+- Keep the database identity stable on the first workspace root and incrementally scan added roots or remove records from detached roots.
+- Migrate compatible version 10 indexes without rescanning unchanged files; Linux `net` measured 19.06 MiB before migration and 8.15 MiB afterward.
+- Remove obsolete workspace-combination and legacy-format caches only after the stable version 11 snapshot has been atomically written.
+- Add a small left inset to graph tabs so full function names remain readable without wasting panel space.
+
 ## 0.8.7
 
 - Keep the default arrow cursor over the graph canvas while using the pointer cursor for clickable function names, line links, tabs, and expand/collapse controls.

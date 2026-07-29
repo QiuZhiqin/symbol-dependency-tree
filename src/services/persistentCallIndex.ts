@@ -6,10 +6,21 @@ import {
   type ScopeReference,
   type TargetSymbol
 } from "../model/symbolTypes";
+import type {
+  IndexedFileRecord,
+  PersistentIndexDocument,
+  StoredCallSite
+} from "../model/persistentIndexTypes";
 import {
   scanCallIndexFile,
   type IndexedFunctionDefinition
 } from "../utils/callIndexScanner";
+import {
+  decodeCompactCallIndex,
+  encodeCompactCallIndex,
+  isCompactCallIndex,
+  legacyCallIndexVersion
+} from "../utils/compactCallIndex";
 import type {
   IndexedMemberOwnerPath,
   IndexedSymbolScope
@@ -21,35 +32,11 @@ import {
 import { buildExcludeGlob, buildExtensionGlob } from "../utils/exclusions";
 import { shortSymbolName } from "../utils/symbolNames";
 
-const databaseVersion = 10;
 const updateConcurrency = 12;
+const journalCompactionEntries = 256;
+const journalCompactionBytes = 2 * 1024 * 1024;
 
-interface StoredCallSite {
-  readonly callee: string;
-  readonly offset: number;
-  readonly kind: "callable" | "symbol";
-  readonly scope?: IndexedSymbolScope;
-  readonly memberOwnerPath?: IndexedMemberOwnerPath;
-  readonly implicitMemberOwner?: string;
-  readonly callerIndex: number;
-}
-
-interface StoredMemberType {
-  readonly owner: string;
-  readonly member: string;
-  readonly typeName: string;
-}
-
-interface IndexedFileRecord {
-  readonly uri: string;
-  readonly mtime: number;
-  readonly size: number;
-  readonly definitions: readonly IndexedFunctionDefinition[];
-  readonly calls: readonly StoredCallSite[];
-  readonly memberTypes: readonly StoredMemberType[];
-}
-
-interface PersistedCallIndex {
+interface LegacyPersistedCallIndex {
   readonly version: number;
   readonly files: readonly IndexedFileRecord[];
 }
@@ -93,6 +80,30 @@ function workspaceIdentity(): string {
     .map((folder) => folder.uri.toString())
     .sort()
     .join("|");
+}
+
+function workspaceRoots(): string[] {
+  return (vscode.workspace.workspaceFolders ?? []).map((folder) =>
+    folder.uri.toString()
+  );
+}
+
+function storageIdentity(): string {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.toString() ?? "global";
+}
+
+function digest(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 20);
+}
+
+function sameValues(
+  left: readonly string[],
+  right: readonly string[]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
 }
 
 function configurationGlobs(): { include: string; exclude: string } {
@@ -204,10 +215,19 @@ export class PersistentCallIndex implements vscode.Disposable {
   private readonly changes = new vscode.EventEmitter<void>();
   private readonly statusChanges = new vscode.EventEmitter<PersistentIndexStatus>();
   private readonly watcher: vscode.FileSystemWatcher;
+  private readonly workspaceFolderChanges: vscode.Disposable;
   private readonly pendingUpdates = new Map<string, NodeJS.Timeout>();
+  private readonly journalEntries = new Map<
+    string,
+    IndexedFileRecord | undefined
+  >();
+  private readonly legacySources = new Set<string>();
   private loaded = false;
   private databaseAvailable = false;
+  private persistedRoots: readonly string[] = [];
+  private snapshotLocation: string | undefined;
   private readyPromise: Promise<void> | undefined;
+  private mutationTail: Promise<void> = Promise.resolve();
   private currentStatus: PersistentIndexStatus = {
     phase: "idle",
     stats: { files: 0, functions: 0, calls: 0 }
@@ -225,42 +245,43 @@ export class PersistentCallIndex implements vscode.Disposable {
     this.watcher.onDidCreate((uri) => this.scheduleUpdate(uri));
     this.watcher.onDidChange((uri) => this.scheduleUpdate(uri));
     this.watcher.onDidDelete((uri) => {
-      if (this.files.delete(uri.toString())) {
-        this.rebuildLookup();
-        void this.save();
-        this.setStatus({ phase: "ready", stats: this.stats() });
-        this.changes.fire();
-      }
+      void this.enqueueMutation(() => this.deleteFile(uri)).catch(
+        (error: unknown) => this.reportBackgroundFailure(error)
+      );
     });
-  }
-
-  public dispose(): void {
-    for (const timeout of this.pendingUpdates.values()) {
-      clearTimeout(timeout);
-    }
-    this.pendingUpdates.clear();
-    this.watcher.dispose();
-    this.changes.dispose();
-    this.statusChanges.dispose();
-  }
-
-  public async ensureReady(token: vscode.CancellationToken): Promise<void> {
-    if (this.readyPromise === undefined) {
-      this.readyPromise = this.loadOrBuild(token).catch((error: unknown) => {
-        this.readyPromise = undefined;
-        this.setStatus({
-          phase: "error",
-          stats: this.stats(),
-          detail: String(error)
+    this.workspaceFolderChanges = vscode.workspace.onDidChangeWorkspaceFolders(
+      (event) => {
+        const operation = this.enqueueMutation(async () => {
+          const source = new vscode.CancellationTokenSource();
+          try {
+            if (!this.loaded) {
+              await this.loadOrBuild(source.token);
+            }
+            await this.updateWorkspaceFolders(event);
+          } finally {
+            source.dispose();
+          }
         });
-        throw error;
-      });
-    }
-    await this.readyPromise;
+        void this.trackReady(operation).catch((error: unknown) => {
+          this.output.appendLine(
+            `Workspace-folder index update failed: ${String(error)}`
+          );
+        });
+      }
+    );
   }
 
-  public async rebuild(token: vscode.CancellationToken): Promise<PersistentIndexStats> {
-    this.readyPromise = this.refresh(token, true).catch((error: unknown) => {
+  private enqueueMutation<T>(task: () => Promise<T>): Promise<T> {
+    const operation = this.mutationTail.then(task, task);
+    this.mutationTail = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    return operation;
+  }
+
+  private trackReady(operation: Promise<void>): Promise<void> {
+    this.readyPromise = operation.catch((error: unknown) => {
       this.readyPromise = undefined;
       this.setStatus({
         phase: "error",
@@ -269,6 +290,33 @@ export class PersistentCallIndex implements vscode.Disposable {
       });
       throw error;
     });
+    return this.readyPromise;
+  }
+
+  public dispose(): void {
+    for (const timeout of this.pendingUpdates.values()) {
+      clearTimeout(timeout);
+    }
+    this.pendingUpdates.clear();
+    this.watcher.dispose();
+    this.workspaceFolderChanges.dispose();
+    this.changes.dispose();
+    this.statusChanges.dispose();
+  }
+
+  public async ensureReady(token: vscode.CancellationToken): Promise<void> {
+    if (this.readyPromise === undefined) {
+      this.trackReady(
+        this.enqueueMutation(() => this.loadOrBuild(token))
+      );
+    }
+    await this.readyPromise;
+  }
+
+  public async rebuild(token: vscode.CancellationToken): Promise<PersistentIndexStats> {
+    this.trackReady(
+      this.enqueueMutation(() => this.refresh(token, true))
+    );
     await this.readyPromise;
     return this.stats();
   }
@@ -444,26 +492,42 @@ export class PersistentCallIndex implements vscode.Disposable {
       : vscode.Uri.joinPath(firstWorkspaceFolder.uri, ".symbol-dependency-tree");
   }
 
-  private databaseUri(
+  private snapshotUri(
+    directory = this.databaseDirectoryUri()
+  ): vscode.Uri {
+    return vscode.Uri.joinPath(
+      directory,
+      `call-index-${digest(storageIdentity())}.json.gz`
+    );
+  }
+
+  private journalUri(
+    directory = this.databaseDirectoryUri()
+  ): vscode.Uri {
+    return vscode.Uri.joinPath(
+      directory,
+      `call-index-${digest(storageIdentity())}.delta.json.gz`
+    );
+  }
+
+  private legacyDatabaseUri(
     directory = this.databaseDirectoryUri(),
     compressed = true
   ): vscode.Uri {
-    const digest = createHash("sha256")
-      .update(workspaceIdentity())
-      .digest("hex")
-      .slice(0, 20);
     return vscode.Uri.joinPath(
       directory,
-      `call-index-${digest}.${compressed ? "json.gz" : "json"}`
+      `call-index-${digest(workspaceIdentity())}.${compressed ? "json.gz" : "json"}`
     );
   }
 
   private databaseCandidateUris(): readonly vscode.Uri[] {
     const values = [
-      this.databaseUri(),
-      this.databaseUri(this.databaseDirectoryUri(), false),
-      this.databaseUri(this.fallbackStorageUri),
-      this.databaseUri(this.fallbackStorageUri, false)
+      this.snapshotUri(),
+      this.legacyDatabaseUri(),
+      this.legacyDatabaseUri(this.databaseDirectoryUri(), false),
+      this.snapshotUri(this.fallbackStorageUri),
+      this.legacyDatabaseUri(this.fallbackStorageUri),
+      this.legacyDatabaseUri(this.fallbackStorageUri, false)
     ];
     return [
       ...new Map(values.map((uri) => [uri.toString(), uri])).values()
@@ -472,8 +536,8 @@ export class PersistentCallIndex implements vscode.Disposable {
 
   private async loadOrBuild(token: vscode.CancellationToken): Promise<void> {
     const loaded = await this.load();
-    if (!loaded && !token.isCancellationRequested) {
-      await this.refresh(token, true);
+    if (!token.isCancellationRequested) {
+      await this.refresh(token, !loaded);
     }
   }
 
@@ -483,21 +547,39 @@ export class PersistentCallIndex implements vscode.Disposable {
     }
     this.setStatus({ phase: "loading", stats: this.stats() });
     this.loaded = true;
-    const databaseUri = this.databaseUri();
+    const snapshotUri = this.snapshotUri();
     let sourceUri: vscode.Uri | undefined;
-    let persisted: PersistedCallIndex | undefined;
+    let persisted: PersistentIndexDocument | undefined;
+    let compactSource = false;
     for (const candidate of this.databaseCandidateUris()) {
       try {
         const bytes = await vscode.workspace.fs.readFile(candidate);
-        const decoded = await decodeCompressedOrPlainJson<PersistedCallIndex>(bytes);
-        if (decoded.version !== databaseVersion) {
+        const decoded = await decodeCompressedOrPlainJson<unknown>(bytes);
+        if (isCompactCallIndex(decoded)) {
+          sourceUri = candidate;
+          persisted = decodeCompactCallIndex(decoded);
+          compactSource = true;
+          break;
+        }
+        if (
+          typeof decoded !== "object" ||
+          decoded === null ||
+          !("version" in decoded) ||
+          decoded.version !== legacyCallIndexVersion ||
+          !("files" in decoded) ||
+          !Array.isArray(decoded.files)
+        ) {
           continue;
         }
         sourceUri = candidate;
-        persisted = decoded;
+        persisted = {
+          roots: [],
+          files: (decoded as LegacyPersistedCallIndex).files,
+          deletedUris: []
+        };
         break;
       } catch {
-        // Try the next workspace/global and compressed/plain candidate.
+        // Try the next stable, workspace-combination, or global candidate.
       }
     }
     if (sourceUri === undefined || persisted === undefined) {
@@ -507,26 +589,25 @@ export class PersistentCallIndex implements vscode.Disposable {
       for (const file of persisted.files) {
         this.files.set(file.uri, file);
       }
+      for (const uri of persisted.deletedUris) {
+        this.files.delete(uri);
+      }
+      this.persistedRoots = persisted.roots;
+      if (
+        compactSource &&
+        sourceUri.toString() === snapshotUri.toString()
+      ) {
+        this.snapshotLocation = sourceUri.toString();
+        await this.loadJournal();
+      } else {
+        this.legacySources.add(sourceUri.toString());
+      }
       this.rebuildLookup();
       this.databaseAvailable = true;
-      if (sourceUri.toString() !== databaseUri.toString()) {
-        try {
-          await this.save();
-          this.output.appendLine(
-            `Persistent symbol index migrated to compressed workspace storage: ${databaseUri.toString()}`
-          );
-        } catch (error) {
-          this.output.appendLine(
-            `Unable to migrate the legacy symbol index: ${String(error)}`
-          );
-        }
-      } else {
-        await this.removeLegacyDatabaseFiles();
-      }
       const stats = this.stats();
       this.setStatus({ phase: "ready", stats });
       this.output.appendLine(
-        `Persistent call index loaded from ${sourceUri.toString()}: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls`
+        `Persistent call index loaded from ${sourceUri.toString()}: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls${compactSource ? "" : " (legacy v10 migration pending)"}`
       );
       return true;
     } catch (error) {
@@ -538,6 +619,8 @@ export class PersistentCallIndex implements vscode.Disposable {
   private async refresh(token: vscode.CancellationToken, force: boolean): Promise<void> {
     const started = Date.now();
     await this.load();
+    const roots = workspaceRoots();
+    const rootsChanged = !sameValues(this.persistedRoots, roots);
     this.setStatus({
       phase: "building",
       stats: this.stats(),
@@ -546,6 +629,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     });
     const { include, exclude } = configurationGlobs();
     const uris = await vscode.workspace.findFiles(include, exclude, undefined, token);
+    let changed = false;
     let processedFiles = 0;
     this.setStatus({
       phase: "building",
@@ -557,6 +641,8 @@ export class PersistentCallIndex implements vscode.Disposable {
     for (const key of this.files.keys()) {
       if (!seen.has(key)) {
         this.files.delete(key);
+        this.recordDeletion(key);
+        changed = true;
       }
     }
 
@@ -582,7 +668,9 @@ export class PersistentCallIndex implements vscode.Disposable {
           ) {
             return;
           }
-          await this.indexFile(uri, stat);
+          const indexed = await this.indexFile(uri, stat);
+          this.recordUpsert(indexed);
+          changed = true;
         })
       );
       processedFiles += batch.length;
@@ -603,7 +691,18 @@ export class PersistentCallIndex implements vscode.Disposable {
       return;
     }
     this.rebuildLookup();
-    await this.save();
+    if (
+      force ||
+      changed ||
+      rootsChanged ||
+      this.snapshotLocation !== this.snapshotUri().toString()
+    ) {
+      if (force) {
+        await this.writeSnapshot();
+      } else {
+        await this.persistIncremental();
+      }
+    }
     const stats = this.stats();
     this.setStatus({ phase: "ready", stats });
     this.output.appendLine(
@@ -612,14 +711,17 @@ export class PersistentCallIndex implements vscode.Disposable {
     this.changes.fire();
   }
 
-  private async indexFile(uri: vscode.Uri, stat?: vscode.FileStat): Promise<void> {
+  private async indexFile(
+    uri: vscode.Uri,
+    stat?: vscode.FileStat
+  ): Promise<IndexedFileRecord> {
     const currentStat = stat ?? (await vscode.workspace.fs.stat(uri));
     const bytes = await vscode.workspace.fs.readFile(uri);
     const scanned = scanCallIndexFile(Buffer.from(bytes).toString("utf8"));
     const callerIndexes = new Map(
       scanned.definitions.map((definition, index) => [definition.selectionStart, index])
     );
-    this.files.set(uri.toString(), {
+    const indexed: IndexedFileRecord = {
       uri: uri.toString(),
       mtime: currentStat.mtime,
       size: currentStat.size,
@@ -648,7 +750,9 @@ export class PersistentCallIndex implements vscode.Disposable {
               callerIndex
             }];
       })
-    });
+    };
+    this.files.set(uri.toString(), indexed);
+    return indexed;
   }
 
   private rebuildLookup(): void {
@@ -687,28 +791,130 @@ export class PersistentCallIndex implements vscode.Disposable {
     }
   }
 
-  private async save(): Promise<void> {
-    await vscode.workspace.fs.createDirectory(this.databaseDirectoryUri());
-    const persisted: PersistedCallIndex = {
-      version: databaseVersion,
-      files: [...this.files.values()]
+  private async loadJournal(): Promise<void> {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(this.journalUri());
+      const decoded = await decodeCompressedOrPlainJson<unknown>(bytes);
+      const journal = decodeCompactCallIndex(decoded);
+      for (const file of journal.files) {
+        this.files.set(file.uri, file);
+        this.journalEntries.set(file.uri, file);
+      }
+      for (const uri of journal.deletedUris) {
+        this.files.delete(uri);
+        this.journalEntries.set(uri, undefined);
+      }
+      this.persistedRoots = journal.roots;
+      this.output.appendLine(
+        `Persistent call-index journal loaded: ${journal.files.length} updates, ${journal.deletedUris.length} deletions`
+      );
+    } catch {
+      // A missing or interrupted journal leaves the last atomic snapshot usable.
+    }
+  }
+
+  private recordUpsert(file: IndexedFileRecord): void {
+    this.journalEntries.set(file.uri, file);
+  }
+
+  private recordDeletion(uri: string): void {
+    this.journalEntries.set(uri, undefined);
+  }
+
+  private async persistIncremental(): Promise<void> {
+    if (
+      this.snapshotLocation !== this.snapshotUri().toString() ||
+      this.journalEntries.size >= journalCompactionEntries
+    ) {
+      await this.writeSnapshot();
+      return;
+    }
+    const document: PersistentIndexDocument = {
+      roots: workspaceRoots(),
+      files: [...this.journalEntries.values()].flatMap((file) =>
+        file === undefined ? [] : [file]
+      ),
+      deletedUris: [...this.journalEntries.entries()].flatMap(
+        ([uri, file]) => file === undefined ? [uri] : []
+      )
     };
-    const encoded = await encodeCompressedJson(persisted);
-    await vscode.workspace.fs.writeFile(
-      this.databaseUri(),
-      encoded.bytes
+    const encoded = await encodeCompressedJson(
+      encodeCompactCallIndex(document)
     );
-    await this.removeLegacyDatabaseFiles();
+    if (encoded.bytes.byteLength >= journalCompactionBytes) {
+      await this.writeSnapshot();
+      return;
+    }
+    await this.writeAtomic(this.journalUri(), encoded.bytes);
+    this.persistedRoots = document.roots;
     this.databaseAvailable = true;
     this.output.appendLine(
-      `Persistent call index compressed: ${encoded.uncompressedBytes} -> ${encoded.bytes.byteLength} bytes`
+      `Persistent call-index journal saved: ${document.files.length} updates, ${document.deletedUris.length} deletions, ${encoded.bytes.byteLength} bytes`
     );
   }
 
+  private async writeSnapshot(): Promise<void> {
+    const document: PersistentIndexDocument = {
+      roots: workspaceRoots(),
+      files: [...this.files.values()],
+      deletedUris: []
+    };
+    const encoded = await encodeCompressedJson(
+      encodeCompactCallIndex(document)
+    );
+    const snapshotUri = this.snapshotUri();
+    await this.writeAtomic(snapshotUri, encoded.bytes);
+    try {
+      await vscode.workspace.fs.delete(this.journalUri());
+    } catch {
+      // The first compact snapshot has no journal yet.
+    }
+    this.journalEntries.clear();
+    this.persistedRoots = document.roots;
+    this.snapshotLocation = snapshotUri.toString();
+    this.databaseAvailable = true;
+    await this.removeLegacyDatabaseFiles();
+    this.output.appendLine(
+      `Persistent compact call index saved: ${encoded.uncompressedBytes} -> ${encoded.bytes.byteLength} bytes`
+    );
+  }
+
+  private async writeAtomic(
+    target: vscode.Uri,
+    bytes: Uint8Array
+  ): Promise<void> {
+    await vscode.workspace.fs.createDirectory(this.databaseDirectoryUri());
+    const temporary = target.with({ path: `${target.path}.tmp` });
+    await vscode.workspace.fs.writeFile(temporary, bytes);
+    await vscode.workspace.fs.rename(temporary, target, { overwrite: true });
+  }
+
   private async removeLegacyDatabaseFiles(): Promise<void> {
-    const active = this.databaseUri().toString();
-    for (const uri of this.databaseCandidateUris()) {
-      if (uri.toString() === active) {
+    const activeSnapshot = this.snapshotUri().toString();
+    const activeJournal = this.journalUri().toString();
+    const candidates = new Map<string, vscode.Uri>(
+      [
+        ...this.databaseCandidateUris(),
+        ...[...this.legacySources].map((uri) => vscode.Uri.parse(uri))
+      ].map((uri) => [uri.toString(), uri])
+    );
+    try {
+      const directory = this.databaseDirectoryUri();
+      const entries = await vscode.workspace.fs.readDirectory(directory);
+      for (const [name, type] of entries) {
+        if (
+          type === vscode.FileType.File &&
+          /^call-index-[a-f0-9]{20}(?:\.delta)?\.json(?:\.gz)?$/u.test(name)
+        ) {
+          const uri = vscode.Uri.joinPath(directory, name);
+          candidates.set(uri.toString(), uri);
+        }
+      }
+    } catch {
+      // A newly created storage directory has no additional legacy files.
+    }
+    for (const [key, uri] of candidates) {
+      if (key === activeSnapshot || key === activeJournal) {
         continue;
       }
       try {
@@ -718,6 +924,99 @@ export class PersistentCallIndex implements vscode.Disposable {
         // Missing or inaccessible legacy files need no cleanup.
       }
     }
+    this.legacySources.clear();
+  }
+
+  private async updateWorkspaceFolders(
+    event: vscode.WorkspaceFoldersChangeEvent
+  ): Promise<void> {
+    const started = Date.now();
+    const { include, exclude } = configurationGlobs();
+    const addedUris = (
+      await Promise.all(
+        event.added.map((folder) =>
+          vscode.workspace.findFiles(
+            new vscode.RelativePattern(folder, include),
+            exclude
+          )
+        )
+      )
+    ).flat();
+    let changed = false;
+    let processedFiles = 0;
+    this.setStatus({
+      phase: "building",
+      stats: this.stats(),
+      processedFiles,
+      totalFiles: addedUris.length,
+      detail: "Updating workspace folders"
+    });
+
+    for (const [key, file] of this.files) {
+      if (
+        vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(file.uri)) ===
+        undefined
+      ) {
+        this.files.delete(key);
+        this.recordDeletion(key);
+        changed = true;
+      }
+    }
+
+    for (const batch of chunks(addedUris, updateConcurrency)) {
+      await Promise.all(
+        batch.map(async (uri) => {
+          const stat = await vscode.workspace.fs.stat(uri);
+          const existing = this.files.get(uri.toString());
+          if (
+            existing !== undefined &&
+            existing.mtime === stat.mtime &&
+            existing.size === stat.size
+          ) {
+            return;
+          }
+          const indexed = await this.indexFile(uri, stat);
+          this.recordUpsert(indexed);
+          changed = true;
+        })
+      );
+      processedFiles += batch.length;
+      this.setStatus({
+        phase: "building",
+        stats: this.stats(),
+        processedFiles,
+        totalFiles: addedUris.length,
+        detail: "Updating workspace folders"
+      });
+    }
+
+    const rootsChanged = !sameValues(this.persistedRoots, workspaceRoots());
+    if (
+      changed ||
+      rootsChanged ||
+      this.snapshotLocation !== this.snapshotUri().toString()
+    ) {
+      this.rebuildLookup();
+      await this.persistIncremental();
+      this.changes.fire();
+    }
+    const stats = this.stats();
+    this.setStatus({ phase: "ready", stats });
+    this.output.appendLine(
+      `Workspace-folder index update ready: ${event.added.length} added roots, ${event.removed.length} removed roots, ${stats.files} files in ${Date.now() - started} ms`
+    );
+  }
+
+  private async deleteFile(uri: vscode.Uri): Promise<void> {
+    const key = uri.toString();
+    if (!this.files.delete(key)) {
+      return;
+    }
+    this.recordDeletion(key);
+    this.rebuildLookup();
+    await this.persistIncremental();
+    this.setStatus({ phase: "ready", stats: this.stats() });
+    this.changes.fire();
   }
 
   private scheduleUpdate(uri: vscode.Uri): void {
@@ -733,16 +1032,22 @@ export class PersistentCallIndex implements vscode.Disposable {
       key,
       setTimeout(() => {
         this.pendingUpdates.delete(key);
-        void this.updateFile(uri);
+        void this.enqueueMutation(() => this.updateFile(uri)).catch(
+          (error: unknown) => this.reportBackgroundFailure(error)
+        );
       }, 350)
     );
   }
 
   private async updateFile(uri: vscode.Uri): Promise<void> {
     try {
-      await this.indexFile(uri);
+      if (vscode.workspace.getWorkspaceFolder(uri) === undefined) {
+        return;
+      }
+      const indexed = await this.indexFile(uri);
+      this.recordUpsert(indexed);
       this.rebuildLookup();
-      await this.save();
+      await this.persistIncremental();
       this.setStatus({ phase: "ready", stats: this.stats() });
       this.changes.fire();
     } catch (error) {
@@ -758,5 +1063,14 @@ export class PersistentCallIndex implements vscode.Disposable {
   private setStatus(status: PersistentIndexStatus): void {
     this.currentStatus = status;
     this.statusChanges.fire(status);
+  }
+
+  private reportBackgroundFailure(error: unknown): void {
+    this.setStatus({
+      phase: "error",
+      stats: this.stats(),
+      detail: String(error)
+    });
+    this.output.appendLine(`Persistent index background update failed: ${String(error)}`);
   }
 }

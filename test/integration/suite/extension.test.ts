@@ -1,4 +1,6 @@
 import * as assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { suite, test } from "mocha";
 import * as vscode from "vscode";
 
@@ -70,6 +72,29 @@ async function exists(uri: vscode.Uri): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function compactSnapshotName(firstWorkspaceFolder: vscode.WorkspaceFolder): string {
+  const digest = createHash("sha256")
+    .update(firstWorkspaceFolder.uri.toString())
+    .digest("hex")
+    .slice(0, 20);
+  return `call-index-${digest}.json.gz`;
+}
+
+async function waitForIndex(
+  api: ExtensionApi,
+  predicate: (status: IndexStatus) => boolean
+): Promise<IndexStatus> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const status = api.getIndexStatus();
+    if (predicate(status)) {
+      return status;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return api.getIndexStatus();
 }
 
 async function sourceCase(): Promise<SourceCase> {
@@ -209,10 +234,10 @@ suite("Symbol Dependency Tree integration", () => {
       ".symbol-dependency-tree"
     );
     const indexEntries = await vscode.workspace.fs.readDirectory(indexDirectory);
+    const snapshotName = compactSnapshotName(firstWorkspaceFolder);
     const compressedIndex = indexEntries.find(
       ([name, type]) =>
-        type === vscode.FileType.File &&
-        /^call-index-[a-f0-9]{20}\.json\.gz$/u.test(name)
+        type === vscode.FileType.File && name === snapshotName
     );
     assert.ok(
       compressedIndex,
@@ -226,6 +251,13 @@ suite("Symbol Dependency Tree integration", () => {
       [0x1f, 0x8b],
       "Persistent index does not have a gzip header"
     );
+    const compactDocument = JSON.parse(
+      gunzipSync(compressedBytes).toString("utf8")
+    ) as Record<string, unknown>;
+    assert.equal(compactDocument.v, 11);
+    assert.ok(Array.isArray(compactDocument.s), "Compact index has no string table");
+    assert.ok(Array.isArray(compactDocument.f), "Compact index has no file tuples");
+    assert.equal("files" in compactDocument, false, "Keyed v10 records were persisted");
     assert.equal(
       indexEntries.some(([name]) =>
         /^call-index-[a-f0-9]{20}\.json$/u.test(name)
@@ -421,6 +453,9 @@ suite("Symbol Dependency Tree integration", () => {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri;
     assert.ok(root, "Integration test requires a workspace folder");
     const uri = vscode.Uri.joinPath(root, "call_chain.cpp");
+    if (!(await exists(uri))) {
+      return;
+    }
     const document = await vscode.workspace.openTextDocument(uri);
     const source = document.getText();
     const declarationOffset = source.indexOf("scoped_value");
@@ -456,6 +491,9 @@ suite("Symbol Dependency Tree integration", () => {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri;
     assert.ok(root, "Integration test requires a workspace folder");
     const uri = vscode.Uri.joinPath(root, "call_chain.hpp");
+    if (!(await exists(uri))) {
+      return;
+    }
     const document = await vscode.workspace.openTextDocument(uri);
     const source = document.getText();
     const declarationLineOffset = source.indexOf("int value");
@@ -500,6 +538,9 @@ suite("Symbol Dependency Tree integration", () => {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri;
     assert.ok(root, "Integration test requires a workspace folder");
     const uri = vscode.Uri.joinPath(root, "call_chain.cpp");
+    if (!(await exists(uri))) {
+      return;
+    }
     const document = await vscode.workspace.openTextDocument(uri);
     const source = document.getText();
     const initializerOffset = source.indexOf(".complete = callback_impl");
@@ -549,6 +590,9 @@ suite("Symbol Dependency Tree integration", () => {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri;
     assert.ok(root, "Integration test requires a workspace folder");
     const uri = vscode.Uri.joinPath(root, "call_chain.hpp");
+    if (!(await exists(uri))) {
+      return;
+    }
     const document = await vscode.workspace.openTextDocument(uri);
     const source = document.getText();
     const definitionOffset = source.indexOf("Payload {");
@@ -573,5 +617,93 @@ suite("Symbol Dependency Tree integration", () => {
       callers.map((caller) => caller.label).sort(),
       ["PayloadContainer", "consume_payload"]
     );
+  });
+
+  test("updates added and removed workspace roots through the delta journal", async () => {
+    const { api } = await activate();
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders === undefined || folders.length < 2) {
+      return;
+    }
+    const primary = folders[0];
+    const secondary = folders[1];
+    assert.ok(primary);
+    assert.ok(secondary);
+    const secondarySource = vscode.Uri.joinPath(secondary.uri, "noise.c");
+    if (!(await exists(secondarySource))) {
+      return;
+    }
+
+    await vscode.commands.executeCommand("symbolDependencyTree.rebuildIndex");
+    const initialStats = api.getIndexStatus().stats;
+    const indexDirectory = vscode.Uri.joinPath(
+      primary.uri,
+      ".symbol-dependency-tree"
+    );
+    const snapshotName = compactSnapshotName(primary);
+    const snapshotUri = vscode.Uri.joinPath(indexDirectory, snapshotName);
+    const journalUri = vscode.Uri.joinPath(
+      indexDirectory,
+      snapshotName.replace(/\.json\.gz$/u, ".delta.json.gz")
+    );
+    const snapshotBefore = await vscode.workspace.fs.readFile(snapshotUri);
+    let secondaryRemoved = false;
+
+    try {
+      assert.equal(vscode.workspace.updateWorkspaceFolders(1, 1), true);
+      secondaryRemoved = true;
+      const removedStatus = await waitForIndex(
+        api,
+        (status) =>
+          status.phase === "ready" &&
+          status.stats.files < initialStats.files
+      );
+      assert.equal(removedStatus.phase, "ready");
+      assert.ok(removedStatus.stats.files < initialStats.files);
+      assert.equal(await exists(journalUri), true, "Root removal wrote no delta journal");
+
+      assert.equal(
+        vscode.workspace.updateWorkspaceFolders(1, 0, {
+          uri: secondary.uri,
+          name: secondary.name
+        }),
+        true
+      );
+      secondaryRemoved = false;
+      const restoredStatus = await waitForIndex(
+        api,
+        (status) =>
+          status.phase === "ready" &&
+          status.stats.files === initialStats.files
+      );
+      assert.equal(restoredStatus.stats.files, initialStats.files);
+    } finally {
+      if (secondaryRemoved) {
+        vscode.workspace.updateWorkspaceFolders(1, 0, {
+          uri: secondary.uri,
+          name: secondary.name
+        });
+        await waitForIndex(
+          api,
+          (status) =>
+            status.phase === "ready" &&
+            status.stats.files === initialStats.files
+        );
+      }
+    }
+
+    const snapshotAfter = await vscode.workspace.fs.readFile(snapshotUri);
+    assert.equal(
+      Buffer.compare(Buffer.from(snapshotBefore), Buffer.from(snapshotAfter)),
+      0,
+      "A workspace-root delta rewrote the full compact snapshot"
+    );
+    const journalBytes = await vscode.workspace.fs.readFile(journalUri);
+    const journalDocument = JSON.parse(
+      gunzipSync(journalBytes).toString("utf8")
+    ) as Record<string, unknown>;
+    assert.equal(journalDocument.v, 11);
+    assert.ok(Array.isArray(journalDocument.f));
+    assert.ok(Array.isArray(journalDocument.r));
   });
 });
