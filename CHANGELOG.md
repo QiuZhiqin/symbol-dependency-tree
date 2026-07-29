@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0
+
+- Show the persistent index state in a native VS Code status bar item instead of above the graph.
+- Show disk loading and build percentage in the status bar; expose file, function, reference, progress, cancellation, and error details in its hover popup.
+- Start loading the persisted index after workspace activation and rebuild it when the status bar item is clicked.
+
+## 0.7.1
+
+- Recognize packing/export/attribute macros placed between `struct`, `class`, or `union` and the actual type tag.
+- Resolve declarations such as `struct GNU_PACKED add_vbss_entry_msg` to `add_vbss_entry_msg::stamac`, matching references through `msg->stamac`.
+- Rebuild version 7 of the persistent database so previously misidentified attributed types are re-indexed.
+
 ## 0.7.0
 
 - Bind local-variable references to their declaration, containing block, function, and file instead of merging equal names workspace-wide.

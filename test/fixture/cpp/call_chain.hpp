@@ -2,8 +2,9 @@
 
 #define APPLY_TWICE(value) ((value) + (value))
 #define PROJECT_NAME "symbol-reference-tree"
+#define GNU_PACKED __attribute__((packed))
 
-struct Counter {
+struct GNU_PACKED Counter {
   int value;
   void increment();
 };

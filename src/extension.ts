@@ -8,7 +8,11 @@ import {
   SymbolDependencyGraphViewProvider,
   type GraphTabSnapshot
 } from "./providers/symbolDependencyGraphViewProvider";
-import { PersistentCallIndex } from "./services/persistentCallIndex";
+import { PersistentIndexStatusBar } from "./providers/persistentIndexStatusBar";
+import {
+  PersistentCallIndex,
+  type PersistentIndexStatus
+} from "./services/persistentCallIndex";
 import { QueryCache } from "./services/queryCache";
 import { ReferenceResolver } from "./services/referenceResolver";
 import { SymbolResolver } from "./services/symbolResolver";
@@ -21,6 +25,7 @@ export interface SymbolDependencyTreeApi {
   readonly getGraphState: () => GraphStatePayload;
   readonly getLayoutMeasurements: () => readonly GraphNodeMeasurement[];
   readonly getGraphPanels: () => readonly GraphPanelSnapshot[];
+  readonly getIndexStatus: () => PersistentIndexStatus;
 }
 
 interface OpenReferenceArgument {
@@ -67,6 +72,7 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
   const cache = new QueryCache();
   const symbolResolver = new SymbolResolver();
   const persistentIndex = new PersistentCallIndex(context.globalStorageUri, output);
+  const indexStatusBar = new PersistentIndexStatusBar(persistentIndex.status());
   const referenceResolver = new ReferenceResolver(persistentIndex, cache);
   const graphProvider = new SymbolDependencyGraphViewProvider(
     context.extensionUri,
@@ -154,10 +160,22 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
           title: "Building C/C++ call index",
           cancellable: true
         },
-        async (_progress, token) => persistentIndex.rebuild(token)
+        async (_progress, token) => {
+          if (
+            persistentIndex.status().phase === "loading" ||
+            persistentIndex.status().phase === "building"
+          ) {
+            await persistentIndex.ensureReady(token);
+          }
+          return persistentIndex.rebuild(token);
+        }
       );
       cache.clear();
       await graphProvider.invalidateAll();
+      if (persistentIndex.status().phase === "cancelled") {
+        void vscode.window.showInformationMessage("Symbol index rebuild cancelled.");
+        return;
+      }
       void vscode.window.showInformationMessage(
         `Symbol index ready: ${stats.files} files, ${stats.functions} functions, ${stats.calls} references.`
       );
@@ -167,6 +185,10 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
   const indexChanges = persistentIndex.onDidChange(() => {
     cache.clear();
   });
+  const indexStatusChanges = persistentIndex.onDidStatusChange((status) => {
+    indexStatusBar.update(status);
+  });
+  const startupIndexSource = new vscode.CancellationTokenSource();
 
   const documentChanges = vscode.workspace.onDidChangeTextDocument((event) => {
     cache.clear();
@@ -182,6 +204,7 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
   context.subscriptions.push(
     output,
     persistentIndex,
+    indexStatusBar,
     graphProvider,
     graphView,
     showCommand,
@@ -191,14 +214,21 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
     openCommand,
     rebuildIndexCommand,
     indexChanges,
+    indexStatusChanges,
     documentChanges,
     deletedFiles
   );
 
+  context.subscriptions.push(startupIndexSource);
+  void persistentIndex.ensureReady(startupIndexSource.token).catch((error: unknown) => {
+    output.error(`Unable to initialize the persistent call index: ${String(error)}`);
+  });
+
   return {
     getGraphState: () => graphProvider.snapshot(),
     getLayoutMeasurements: () => graphProvider.layoutMeasurements(),
-    getGraphPanels: () => graphProvider.graphTabs()
+    getGraphPanels: () => graphProvider.graphTabs(),
+    getIndexStatus: () => persistentIndex.status()
   };
 }
 

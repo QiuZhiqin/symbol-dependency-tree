@@ -26,6 +26,18 @@ interface ExtensionApi {
   readonly getGraphState: () => GraphState;
   readonly getLayoutMeasurements: () => readonly GraphNodeMeasurement[];
   readonly getGraphPanels: () => readonly GraphPanelSnapshot[];
+  readonly getIndexStatus: () => IndexStatus;
+}
+
+interface IndexStatus {
+  readonly phase: "idle" | "loading" | "building" | "ready" | "cancelled" | "error";
+  readonly stats: {
+    readonly files: number;
+    readonly functions: number;
+    readonly calls: number;
+  };
+  readonly processedFiles?: number;
+  readonly totalFiles?: number;
 }
 
 interface GraphNodeMeasurement {
@@ -151,7 +163,7 @@ async function waitForMeasurements(
 
 suite("Symbol Dependency Tree integration", () => {
   test("activates and registers every public command", async () => {
-    await activate();
+    const { api } = await activate();
     const commands = new Set(await vscode.commands.getCommands(true));
     for (const command of [
       "symbolDependencyTree.show",
@@ -167,6 +179,11 @@ suite("Symbol Dependency Tree integration", () => {
       !commands.has("symbolDependencyTree.retryWithTextSearch"),
       "Directory text-search fallback command must not be registered"
     );
+    assert.notEqual(
+      api.getIndexStatus().phase,
+      "idle",
+      "Workspace activation should start loading the persistent index"
+    );
   });
 
   test("right-click command resolves callers exclusively from the rebuilt database", async () => {
@@ -180,6 +197,11 @@ suite("Symbol Dependency Tree integration", () => {
     editor.selection = new vscode.Selection(position, position);
 
     await vscode.commands.executeCommand("symbolDependencyTree.rebuildIndex");
+    const indexStatus = api.getIndexStatus();
+    assert.equal(indexStatus.phase, "ready");
+    assert.ok(indexStatus.stats.files > 0);
+    assert.ok(indexStatus.stats.functions > 0);
+    assert.ok(indexStatus.stats.calls > 0);
     const firstWorkspaceFolder = vscode.workspace.workspaceFolders?.[0];
     assert.ok(firstWorkspaceFolder, "The index requires a workspace folder");
     const indexDirectory = vscode.Uri.joinPath(

@@ -169,6 +169,54 @@ function normalizedOwner(name: string | undefined): string | undefined {
   return name?.match(/[A-Za-z_][A-Za-z0-9_]*$/u)?.[0];
 }
 
+function typeTagName(tokens: readonly Token[]): string | undefined {
+  const candidates: Token[] = [];
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  for (const token of tokens) {
+    if (token.text === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (token.text === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (token.text === "[") {
+      bracketDepth += 1;
+      continue;
+    }
+    if (token.text === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (parenDepth > 0 || bracketDepth > 0) {
+      continue;
+    }
+    if (token.text === ":") {
+      break;
+    }
+    if (isIdentifier(token)) {
+      candidates.push(token);
+    }
+  }
+  const decorationPattern =
+    /(?:^__?(?:attribute|declspec|packed|aligned?)__$)|(?:^|_)(?:API|ATTR|ATTRIBUTE|DECLSPEC|EXPORT|IMPORT|PACKED|ALIGNED?)(?:_|$)/iu;
+  const decorationNames = new Set([
+    "__attribute",
+    "__attribute__",
+    "__declspec",
+    "alignas",
+    "final"
+  ]);
+  return candidates.find(
+    (candidate) =>
+      !typeIntroducers.has(candidate.text) &&
+      !decorationNames.has(candidate.text) &&
+      !decorationPattern.test(candidate.text)
+  )?.text ?? candidates[0]?.text;
+}
+
 function scanTypeRanges(
   tokens: readonly Token[],
   bracePairs: ReadonlyMap<number, number>
@@ -176,27 +224,33 @@ function scanTypeRanges(
   const ranges: TypeRange[] = [];
   for (let index = 0; index < tokens.length - 2; index += 1) {
     const keyword = tokens[index];
-    const name = tokens[index + 1];
-    if (
-      keyword === undefined ||
-      !typeIntroducers.has(keyword.text) ||
-      !isIdentifier(name)
-    ) {
+    if (keyword === undefined || !typeIntroducers.has(keyword.text)) {
       continue;
     }
+    const headerTokens: Token[] = [];
     for (let cursor = index + 2; cursor < tokens.length; cursor += 1) {
       const token = tokens[cursor];
       if (token === undefined || token.text === ";") {
         break;
       }
       if (token.text !== "{") {
+        headerTokens.push(token);
         continue;
       }
+      const leading = tokens[index + 1];
+      if (leading !== undefined) {
+        headerTokens.unshift(leading);
+      }
+      const name = typeTagName(headerTokens);
       const closeTokenIndex = bracePairs.get(cursor);
       const close = closeTokenIndex === undefined ? undefined : tokens[closeTokenIndex];
-      if (closeTokenIndex !== undefined && close !== undefined) {
+      if (
+        name !== undefined &&
+        closeTokenIndex !== undefined &&
+        close !== undefined
+      ) {
         ranges.push({
-          name: name.text,
+          name,
           openBrace: token.start,
           closeBrace: close.start,
           openTokenIndex: cursor,

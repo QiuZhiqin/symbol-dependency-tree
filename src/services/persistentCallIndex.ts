@@ -14,7 +14,7 @@ import type { IndexedSymbolScope } from "../utils/cppSymbolScopes";
 import { buildExcludeGlob, buildExtensionGlob } from "../utils/exclusions";
 import { shortSymbolName } from "../utils/symbolNames";
 
-const databaseVersion = 6;
+const databaseVersion = 7;
 const updateConcurrency = 12;
 
 interface StoredCallSite {
@@ -53,6 +53,20 @@ export interface PersistentIndexStats {
   readonly files: number;
   readonly functions: number;
   readonly calls: number;
+}
+
+export interface PersistentIndexStatus {
+  readonly phase:
+    | "idle"
+    | "loading"
+    | "building"
+    | "ready"
+    | "cancelled"
+    | "error";
+  readonly stats: PersistentIndexStats;
+  readonly processedFiles?: number;
+  readonly totalFiles?: number;
+  readonly detail?: string;
 }
 
 export interface PersistentIndexQueryResult {
@@ -138,13 +152,19 @@ export class PersistentCallIndex implements vscode.Disposable {
   private readonly callsByCallee = new Map<string, IndexedCallWithFile[]>();
   private readonly definitionsByName = new Map<string, IndexedDefinitionWithFile[]>();
   private readonly changes = new vscode.EventEmitter<void>();
+  private readonly statusChanges = new vscode.EventEmitter<PersistentIndexStatus>();
   private readonly watcher: vscode.FileSystemWatcher;
   private readonly pendingUpdates = new Map<string, NodeJS.Timeout>();
   private loaded = false;
   private databaseAvailable = false;
   private readyPromise: Promise<void> | undefined;
+  private currentStatus: PersistentIndexStatus = {
+    phase: "idle",
+    stats: { files: 0, functions: 0, calls: 0 }
+  };
 
   public readonly onDidChange = this.changes.event;
+  public readonly onDidStatusChange = this.statusChanges.event;
 
   public constructor(
     private readonly fallbackStorageUri: vscode.Uri,
@@ -158,6 +178,7 @@ export class PersistentCallIndex implements vscode.Disposable {
       if (this.files.delete(uri.toString())) {
         this.rebuildLookup();
         void this.save();
+        this.setStatus({ phase: "ready", stats: this.stats() });
         this.changes.fire();
       }
     });
@@ -170,12 +191,18 @@ export class PersistentCallIndex implements vscode.Disposable {
     this.pendingUpdates.clear();
     this.watcher.dispose();
     this.changes.dispose();
+    this.statusChanges.dispose();
   }
 
   public async ensureReady(token: vscode.CancellationToken): Promise<void> {
     if (this.readyPromise === undefined) {
       this.readyPromise = this.loadOrBuild(token).catch((error: unknown) => {
         this.readyPromise = undefined;
+        this.setStatus({
+          phase: "error",
+          stats: this.stats(),
+          detail: String(error)
+        });
         throw error;
       });
     }
@@ -183,9 +210,21 @@ export class PersistentCallIndex implements vscode.Disposable {
   }
 
   public async rebuild(token: vscode.CancellationToken): Promise<PersistentIndexStats> {
-    this.readyPromise = this.refresh(token, true);
+    this.readyPromise = this.refresh(token, true).catch((error: unknown) => {
+      this.readyPromise = undefined;
+      this.setStatus({
+        phase: "error",
+        stats: this.stats(),
+        detail: String(error)
+      });
+      throw error;
+    });
     await this.readyPromise;
     return this.stats();
+  }
+
+  public status(): PersistentIndexStatus {
+    return this.currentStatus;
   }
 
   public stats(): PersistentIndexStats {
@@ -359,6 +398,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     if (this.loaded) {
       return this.databaseAvailable;
     }
+    this.setStatus({ phase: "loading", stats: this.stats() });
     this.loaded = true;
     const databaseUri = this.databaseUri();
     const legacyDatabaseUri = this.databaseUri(this.fallbackStorageUri);
@@ -398,6 +438,7 @@ export class PersistentCallIndex implements vscode.Disposable {
         }
       }
       const stats = this.stats();
+      this.setStatus({ phase: "ready", stats });
       this.output.appendLine(
         `Persistent call index loaded from ${sourceUri.toString()}: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls`
       );
@@ -411,8 +452,21 @@ export class PersistentCallIndex implements vscode.Disposable {
   private async refresh(token: vscode.CancellationToken, force: boolean): Promise<void> {
     const started = Date.now();
     await this.load();
+    this.setStatus({
+      phase: "building",
+      stats: this.stats(),
+      processedFiles: 0,
+      totalFiles: 0
+    });
     const { include, exclude } = configurationGlobs();
     const uris = await vscode.workspace.findFiles(include, exclude, undefined, token);
+    let processedFiles = 0;
+    this.setStatus({
+      phase: "building",
+      stats: this.stats(),
+      processedFiles,
+      totalFiles: uris.length
+    });
     const seen = new Set(uris.map((uri) => uri.toString()));
     for (const key of this.files.keys()) {
       if (!seen.has(key)) {
@@ -422,6 +476,12 @@ export class PersistentCallIndex implements vscode.Disposable {
 
     for (const batch of chunks(uris, updateConcurrency)) {
       if (token.isCancellationRequested) {
+        this.setStatus({
+          phase: "cancelled",
+          stats: this.stats(),
+          processedFiles,
+          totalFiles: uris.length
+        });
         return;
       }
       await Promise.all(
@@ -439,13 +499,27 @@ export class PersistentCallIndex implements vscode.Disposable {
           await this.indexFile(uri, stat);
         })
       );
+      processedFiles += batch.length;
+      this.setStatus({
+        phase: "building",
+        stats: this.stats(),
+        processedFiles,
+        totalFiles: uris.length
+      });
     }
     if (token.isCancellationRequested) {
+      this.setStatus({
+        phase: "cancelled",
+        stats: this.stats(),
+        processedFiles,
+        totalFiles: uris.length
+      });
       return;
     }
     this.rebuildLookup();
     await this.save();
     const stats = this.stats();
+    this.setStatus({ phase: "ready", stats });
     this.output.appendLine(
       `Persistent call index ready: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls in ${Date.now() - started} ms`
     );
@@ -541,9 +615,20 @@ export class PersistentCallIndex implements vscode.Disposable {
       await this.indexFile(uri);
       this.rebuildLookup();
       await this.save();
+      this.setStatus({ phase: "ready", stats: this.stats() });
       this.changes.fire();
     } catch (error) {
+      this.setStatus({
+        phase: "error",
+        stats: this.stats(),
+        detail: `Unable to update ${uri.fsPath}: ${String(error)}`
+      });
       this.output.appendLine(`Persistent index update failed for ${uri.toString()}: ${String(error)}`);
     }
+  }
+
+  private setStatus(status: PersistentIndexStatus): void {
+    this.currentStatus = status;
+    this.statusChanges.fire(status);
   }
 }

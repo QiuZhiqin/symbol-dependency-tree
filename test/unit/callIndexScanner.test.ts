@@ -198,4 +198,59 @@ void update(B *b, C& c)
       { owner: "C", caller: "update" }
     ]);
   });
+
+  it("ignores a packing macro placed before a structure tag", () => {
+    const source = `
+struct GNU_PACKED add_vbss_entry_msg {
+  unsigned char stamac[6];
+};
+
+struct __attribute__((packed)) attributed_msg {
+  unsigned char address[6];
+};
+
+class API_EXPORT exported_msg {
+  unsigned char address2[6];
+};
+
+void zr_hdo_rm_add_sta_event_to_daemon(struct add_vbss_entry_msg *msg)
+{
+  consume(msg->stamac);
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const declaration = indexed.declarations.find(
+      (candidate) => candidate.name === "stamac"
+    );
+    const reference = indexed.calls.find(
+      (candidate) =>
+        candidate.callee === "stamac" &&
+        candidate.callerName === "zr_hdo_rm_add_sta_event_to_daemon"
+    );
+
+    expect(declaration?.scope).toEqual({
+      kind: "member",
+      owner: "add_vbss_entry_msg"
+    });
+    expect(reference?.scope).toEqual({
+      kind: "member",
+      owner: "add_vbss_entry_msg"
+    });
+    expect(
+      indexed.declarations.find(
+        (candidate) => candidate.name === "address"
+      )?.scope
+    ).toEqual({
+      kind: "member",
+      owner: "attributed_msg"
+    });
+    expect(
+      indexed.declarations.find(
+        (candidate) => candidate.name === "address2"
+      )?.scope
+    ).toEqual({
+      kind: "member",
+      owner: "exported_msg"
+    });
+  });
 });
