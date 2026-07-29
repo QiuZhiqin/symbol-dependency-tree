@@ -10,11 +10,14 @@ import {
   scanCallIndexFile,
   type IndexedFunctionDefinition
 } from "../utils/callIndexScanner";
-import type { IndexedSymbolScope } from "../utils/cppSymbolScopes";
+import type {
+  IndexedMemberOwnerPath,
+  IndexedSymbolScope
+} from "../utils/cppSymbolScopes";
 import { buildExcludeGlob, buildExtensionGlob } from "../utils/exclusions";
 import { shortSymbolName } from "../utils/symbolNames";
 
-const databaseVersion = 7;
+const databaseVersion = 9;
 const updateConcurrency = 12;
 
 interface StoredCallSite {
@@ -22,8 +25,15 @@ interface StoredCallSite {
   readonly offset: number;
   readonly kind: "callable" | "symbol";
   readonly scope?: IndexedSymbolScope;
+  readonly memberOwnerPath?: IndexedMemberOwnerPath;
   readonly implicitMemberOwner?: string;
   readonly callerIndex: number;
+}
+
+interface StoredMemberType {
+  readonly owner: string;
+  readonly member: string;
+  readonly typeName: string;
 }
 
 interface IndexedFileRecord {
@@ -32,6 +42,7 @@ interface IndexedFileRecord {
   readonly size: number;
   readonly definitions: readonly IndexedFunctionDefinition[];
   readonly calls: readonly StoredCallSite[];
+  readonly memberTypes: readonly StoredMemberType[];
 }
 
 interface PersistedCallIndex {
@@ -125,8 +136,10 @@ function callableKind(kind: vscode.SymbolKind): boolean {
 
 function callMatchesScope(
   targetScope: IndexedSymbolScope | undefined,
+  targetMemberOwnerPath: IndexedMemberOwnerPath | undefined,
   canonicalUri: vscode.Uri,
-  candidate: IndexedCallWithFile
+  candidate: IndexedCallWithFile,
+  memberTypes: ReadonlyMap<string, string | undefined>
 ): boolean {
   if (targetScope?.kind === "local") {
     return (
@@ -138,19 +151,52 @@ function callMatchesScope(
     );
   }
   if (targetScope?.kind === "member") {
+    const targetOwner = resolveMemberOwner(
+      targetScope,
+      targetMemberOwnerPath,
+      memberTypes
+    );
+    const candidateOwner = resolveMemberOwner(
+      candidate.call.scope,
+      candidate.call.memberOwnerPath,
+      memberTypes
+    );
     return (
-      (candidate.call.scope?.kind === "member" &&
-        candidate.call.scope.owner === targetScope.owner) ||
-      candidate.call.implicitMemberOwner === targetScope.owner
+      candidateOwner === targetOwner ||
+      candidate.call.implicitMemberOwner === targetOwner
     );
   }
   return candidate.call.scope === undefined;
+}
+
+function memberTypeKey(owner: string, member: string): string {
+  return `${owner}\u0000${member}`;
+}
+
+function resolveMemberOwner(
+  scope: IndexedSymbolScope | undefined,
+  path: IndexedMemberOwnerPath | undefined,
+  memberTypes: ReadonlyMap<string, string | undefined>
+): string | undefined {
+  if (scope?.kind !== "member" || path === undefined) {
+    return scope?.kind === "member" ? scope.owner : undefined;
+  }
+  let owner = path.rootOwner;
+  for (const member of path.members) {
+    const typeName = memberTypes.get(memberTypeKey(owner, member));
+    if (typeName === undefined) {
+      return scope.owner;
+    }
+    owner = typeName;
+  }
+  return owner;
 }
 
 export class PersistentCallIndex implements vscode.Disposable {
   private readonly files = new Map<string, IndexedFileRecord>();
   private readonly callsByCallee = new Map<string, IndexedCallWithFile[]>();
   private readonly definitionsByName = new Map<string, IndexedDefinitionWithFile[]>();
+  private readonly memberTypes = new Map<string, string | undefined>();
   private readonly changes = new vscode.EventEmitter<void>();
   private readonly statusChanges = new vscode.EventEmitter<PersistentIndexStatus>();
   private readonly watcher: vscode.FileSystemWatcher;
@@ -231,7 +277,9 @@ export class PersistentCallIndex implements vscode.Disposable {
     let functions = 0;
     let calls = 0;
     for (const file of this.files.values()) {
-      functions += file.definitions.length;
+      functions += file.definitions.filter(
+        (definition) => definition.kind === "function"
+      ).length;
       calls += file.calls.length;
     }
     return { files: this.files.size, functions, calls };
@@ -276,12 +324,18 @@ export class PersistentCallIndex implements vscode.Disposable {
             ? globalDefinitions[0]!
             : undefined;
     const staticTarget = targetDefinition?.definition.isStatic === true;
-    const functionTarget = targetDefinition !== undefined;
+    const functionTarget = targetDefinition?.definition.kind === "function";
     const candidates = (this.callsByCallee.get(queryName) ?? []).filter(
       (candidate) =>
         (!functionTarget || candidate.call.kind === "callable") &&
         (!staticTarget || candidate.file.uri === targetDefinition.file.uri) &&
-        callMatchesScope(target.scope, canonicalUri, candidate)
+        callMatchesScope(
+          target.scope,
+          target.memberOwnerPath,
+          canonicalUri,
+          candidate,
+          this.memberTypes
+        )
     );
     const grouped = new Map<string, IndexedCallWithFile[]>();
     for (const candidate of candidates) {
@@ -321,6 +375,18 @@ export class PersistentCallIndex implements vscode.Disposable {
         document.positionAt(caller.selectionStart),
         document.positionAt(caller.selectionEnd)
       );
+      const callerKind =
+        caller.kind === "initializer"
+          ? vscode.SymbolKind.Variable
+          : caller.kind === "type"
+            ? caller.typeKind === "class"
+              ? vscode.SymbolKind.Class
+              : caller.typeKind === "enum"
+                ? vscode.SymbolKind.Enum
+                : vscode.SymbolKind.Struct
+            : caller.memberOwner === undefined
+              ? vscode.SymbolKind.Function
+              : vscode.SymbolKind.Method;
       const references: ReferenceHit[] = group.map(({ call }) => ({
         uri,
         range: new vscode.Range(
@@ -333,22 +399,17 @@ export class PersistentCallIndex implements vscode.Disposable {
           uri,
           selectionRange,
           caller.name,
-          caller.memberOwner === undefined
-            ? vscode.SymbolKind.Function
-            : vscode.SymbolKind.Method
+          callerKind
         ),
         name: caller.name,
         displayName: caller.name,
-        kind:
-          caller.memberOwner === undefined
-            ? vscode.SymbolKind.Function
-            : vscode.SymbolKind.Method,
+        kind: callerKind,
         uri,
         range,
         selectionRange,
         definition: new vscode.Location(uri, selectionRange),
         scope:
-          caller.memberOwner === undefined
+          caller.kind === "initializer" || caller.memberOwner === undefined
             ? undefined
             : { kind: "member", owner: caller.memberOwner }
       };
@@ -538,6 +599,16 @@ export class PersistentCallIndex implements vscode.Disposable {
       mtime: currentStat.mtime,
       size: currentStat.size,
       definitions: scanned.definitions,
+      memberTypes: scanned.declarations.flatMap((declaration) =>
+        declaration.scope.kind === "member" &&
+        declaration.typeName !== undefined
+          ? [{
+              owner: declaration.scope.owner,
+              member: declaration.name,
+              typeName: declaration.typeName
+            }]
+          : []
+      ),
       calls: scanned.calls.flatMap((call) => {
         const callerIndex = callerIndexes.get(call.callerSelectionStart);
         return callerIndex === undefined
@@ -547,6 +618,7 @@ export class PersistentCallIndex implements vscode.Disposable {
               offset: call.offset,
               kind: call.kind,
               scope: call.scope,
+              memberOwnerPath: call.memberOwnerPath,
               implicitMemberOwner: call.implicitMemberOwner,
               callerIndex
             }];
@@ -557,6 +629,17 @@ export class PersistentCallIndex implements vscode.Disposable {
   private rebuildLookup(): void {
     this.callsByCallee.clear();
     this.definitionsByName.clear();
+    this.memberTypes.clear();
+    for (const file of this.files.values()) {
+      for (const memberType of file.memberTypes) {
+        const key = memberTypeKey(memberType.owner, memberType.member);
+        if (!this.memberTypes.has(key)) {
+          this.memberTypes.set(key, memberType.typeName);
+        } else if (this.memberTypes.get(key) !== memberType.typeName) {
+          this.memberTypes.set(key, undefined);
+        }
+      }
+    }
     for (const file of this.files.values()) {
       for (const definition of file.definitions) {
         const values = this.definitionsByName.get(definition.name);

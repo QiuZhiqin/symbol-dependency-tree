@@ -65,7 +65,17 @@ export class SymbolResolver {
               owner: exactFunction.memberOwner
             } satisfies IndexedSymbolScope);
       const kind =
-        scope === undefined ? vscode.SymbolKind.Function : vscode.SymbolKind.Method;
+        exactFunction.kind === "initializer"
+          ? vscode.SymbolKind.Variable
+          : exactFunction.kind === "type"
+            ? exactFunction.typeKind === "class"
+              ? vscode.SymbolKind.Class
+              : exactFunction.typeKind === "enum"
+                ? vscode.SymbolKind.Enum
+                : vscode.SymbolKind.Struct
+            : scope === undefined
+              ? vscode.SymbolKind.Function
+              : vscode.SymbolKind.Method;
       return {
         id: symbolKey(uri, selectionRange, name, kind),
         name,
@@ -139,7 +149,8 @@ export class SymbolResolver {
       range,
       selectionRange,
       definition: location,
-      scope
+      scope,
+      memberOwnerPath: occurrence?.memberOwnerPath
     };
   }
 }

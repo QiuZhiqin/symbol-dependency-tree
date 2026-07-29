@@ -253,4 +253,101 @@ void zr_hdo_rm_add_sta_event_to_daemon(struct add_vbss_entry_msg *msg)
       owner: "exported_msg"
     });
   });
+
+  it("indexes callback-table initialization and chained member calls", () => {
+    const source = `
+struct roam_event_ops {
+  void (*drv_zr_sta_steer_complete)(void *ctx);
+};
+
+struct roam_app {
+  const struct roam_event_ops *event_ops;
+};
+
+void zero_roam_sta_steer_event(void *ctx)
+{
+}
+
+struct roam_event_ops event_ops = {
+  .drv_zr_sta_steer_complete = zero_roam_sta_steer_event,
+};
+
+void dispatch(struct roam_app *ctx)
+{
+  ctx->event_ops->drv_zr_sta_steer_complete(ctx);
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const initializer = indexed.definitions.find(
+      (definition) => definition.name === "event_ops"
+    );
+    const callbackReferences = indexed.calls.filter(
+      (call) => call.callee === "drv_zr_sta_steer_complete"
+    );
+
+    expect(initializer?.kind).toBe("initializer");
+    expect(
+      indexed.declarations.find(
+        (declaration) =>
+          declaration.scope.kind === "member" &&
+          declaration.scope.owner === "roam_app" &&
+          declaration.name === "event_ops"
+      )?.typeName
+    ).toBe("roam_event_ops");
+    expect(
+      indexed.calls.find(
+        (call) => call.callee === "zero_roam_sta_steer_event"
+      )
+    ).toMatchObject({
+      kind: "callable",
+      callerName: "event_ops"
+    });
+    expect(callbackReferences).toHaveLength(2);
+    expect(
+      callbackReferences.find((reference) => reference.callerName === "event_ops")
+    ).toMatchObject({
+      kind: "symbol",
+      scope: { kind: "member", owner: "roam_event_ops" },
+      callerName: "event_ops"
+    });
+    expect(
+      callbackReferences.find((reference) => reference.callerName === "dispatch")
+    ).toMatchObject({
+      kind: "callable",
+      scope: { kind: "member", owner: "event_ops" },
+      memberOwnerPath: {
+        rootOwner: "roam_app",
+        members: ["event_ops"]
+      },
+      callerName: "dispatch"
+    });
+  });
+
+  it("indexes a type contained by another type and used by a function", () => {
+    const source = `
+struct A {
+  int value;
+};
+
+struct B {
+  struct A child;
+};
+
+void C(struct A *arg)
+{
+  struct A local;
+  consume(arg);
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const typeDefinitions = indexed.definitions
+      .filter((definition) => definition.kind === "type")
+      .map((definition) => definition.name);
+    const references = indexed.calls
+      .filter((call) => call.callee === "A")
+      .map((call) => call.callerName);
+
+    expect(typeDefinitions).toEqual(["A", "B"]);
+    expect(references).toEqual(["C", "C", "B"]);
+  });
 });

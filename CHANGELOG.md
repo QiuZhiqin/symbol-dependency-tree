@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.2
+
+- Make `struct`, `class`, `union`, and `enum` definitions queryable index roots.
+- Link a type to containing member declarations and to function signatures or local declarations that use it.
+- Show containing types and functions as separate graph nodes without duplicating member declarations or nested method bodies.
+- Rebuild version 9 of the persistent database automatically.
+
+## 0.8.1
+
+- Index designated callback-table initializers such as `.callback = implementation` outside function bodies.
+- Resolve chained indirect calls such as `ctx->event_ops->callback()` through member types declared in other files.
+- Show global callback-table variables as caller nodes and rebuild version 8 of the persistent database automatically.
+
 ## 0.8.0
 
 - Show the persistent index state in a native VS Code status bar item instead of above the graph.

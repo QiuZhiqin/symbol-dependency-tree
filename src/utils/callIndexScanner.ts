@@ -4,14 +4,18 @@ import {
 } from "./cppFunctionScanner";
 import {
   scanCppSymbolScopes,
+  type IndexedMemberOwnerPath,
+  type ScopedIdentifier,
   type IndexedSymbolDeclaration,
   type IndexedSymbolScope
 } from "./cppSymbolScopes";
 import { maskCppCommentsAndLiterals } from "./textScanner";
 
 export interface IndexedFunctionDefinition extends CppFunctionDefinition {
+  readonly kind: "function" | "initializer" | "type";
   readonly isStatic: boolean;
   readonly memberOwner?: string;
+  readonly typeKind?: "class" | "enum" | "struct" | "union";
 }
 
 export interface IndexedCallSite {
@@ -19,6 +23,7 @@ export interface IndexedCallSite {
   readonly offset: number;
   readonly kind: "callable" | "symbol";
   readonly scope?: IndexedSymbolScope;
+  readonly memberOwnerPath?: IndexedMemberOwnerPath;
   readonly implicitMemberOwner?: string;
   readonly callerName: string;
   readonly callerRangeStart: number;
@@ -162,17 +167,45 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
   const masked = maskCppCommentsAndLiterals(source);
   const rawDefinitions = scanCppFunctionDefinitions(source);
   const symbolScopes = scanCppSymbolScopes(source, rawDefinitions);
-  const scopedIdentifiers = new Map(
-    symbolScopes.identifiers.map((identifier) => [identifier.offset, identifier])
+  const scopedIdentifiers = new Map<number, ScopedIdentifier>();
+  for (const declaration of symbolScopes.declarations) {
+    scopedIdentifiers.set(declaration.offset, {
+      name: declaration.name,
+      offset: declaration.offset,
+      scope: declaration.scope
+    });
+  }
+  for (const identifier of symbolScopes.identifiers) {
+    scopedIdentifiers.set(identifier.offset, identifier);
+  }
+  const declarationOffsets = new Set(
+    symbolScopes.declarations.map((declaration) => declaration.offset)
   );
   const definitions = rawDefinitions.map<IndexedFunctionDefinition>(
     (definition) => ({
       ...definition,
+      kind: "function",
       memberOwner: symbolScopes.functionOwners.get(definition.selectionStart),
       isStatic: /\bstatic\b/u.test(
         masked.slice(definition.rangeStart, definition.selectionStart)
       )
     })
+  );
+  definitions.push(
+    ...symbolScopes.initializers.map((initializer) => ({
+      ...initializer,
+      kind: "initializer" as const,
+      isStatic: /\bstatic\b/u.test(
+        masked.slice(initializer.rangeStart, initializer.selectionStart)
+      )
+    }))
+  );
+  definitions.push(
+    ...symbolScopes.types.map((type) => ({
+      ...type,
+      kind: "type" as const,
+      isStatic: false
+    }))
   );
   const calls: IndexedCallSite[] = [];
 
@@ -181,7 +214,8 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
     if (bodyStart < 0 || bodyStart >= caller.rangeEnd) {
       continue;
     }
-    const body = masked.slice(bodyStart + 1, caller.rangeEnd - 1);
+    const scanStart = caller.kind === "type" ? bodyStart + 1 : caller.rangeStart;
+    const body = masked.slice(scanStart, caller.rangeEnd);
     const referencePattern = /\b([A-Za-z_][A-Za-z0-9_]*)\b/gu;
     for (const match of body.matchAll(referencePattern)) {
       const callee = match[1];
@@ -189,6 +223,20 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
         continue;
       }
       const localOffset = match.index ?? 0;
+      const absoluteOffset = scanStart + localOffset;
+      if (
+        (caller.selectionStart <= absoluteOffset &&
+          absoluteOffset < caller.selectionEnd) ||
+        (caller.kind === "type" && declarationOffsets.has(absoluteOffset)) ||
+        (caller.kind === "type" &&
+          rawDefinitions.some(
+            (definition) =>
+              definition.rangeStart <= absoluteOffset &&
+              absoluteOffset < definition.rangeEnd
+          ))
+      ) {
+        continue;
+      }
       const previous = neighboringCharacter(body, localOffset - 1, -1);
       const next = neighboringCharacter(body, localOffset + callee.length, 1);
       const directCall = next === "(";
@@ -207,14 +255,13 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
             immediateArgumentOwner !== undefined &&
             !nonCallNames.has(immediateArgumentOwner)));
       const callable = directCall || addressTaken || assignedFunction || bareFunctionArgument;
-      const scopedIdentifier = scopedIdentifiers.get(
-        bodyStart + 1 + localOffset
-      );
+      const scopedIdentifier = scopedIdentifiers.get(absoluteOffset);
       calls.push({
         callee,
-        offset: bodyStart + 1 + localOffset,
+        offset: absoluteOffset,
         kind: callable ? "callable" : "symbol",
         scope: scopedIdentifier?.scope,
+        memberOwnerPath: scopedIdentifier?.memberOwnerPath,
         implicitMemberOwner: scopedIdentifier?.implicitMemberOwner,
         callerName: caller.name,
         callerRangeStart: caller.rangeStart,

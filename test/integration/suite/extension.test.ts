@@ -478,4 +478,84 @@ suite("Symbol Dependency Tree integration", () => {
       [23]
     );
   });
+
+  test("links callback-table initialization to chained indirect calls", async () => {
+    const { api } = await activate();
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "Integration test requires a workspace folder");
+    const uri = vscode.Uri.joinPath(root, "call_chain.cpp");
+    const document = await vscode.workspace.openTextDocument(uri);
+    const source = document.getText();
+    const initializerOffset = source.indexOf(".complete = callback_impl");
+    assert.ok(initializerOffset >= 0, "Missing callback-table initializer fixture");
+    const callbackOffset = initializerOffset + 1;
+    const position = document.positionAt(callbackOffset);
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(position, position);
+
+    await vscode.commands.executeCommand("symbolDependencyTree.show");
+
+    const state = api.getGraphState();
+    assert.ok(state.rootId, "The callback-member graph has no root");
+    const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+    const graphRoot = nodes.get(state.rootId);
+    assert.ok(graphRoot);
+    const callers = graphRoot.childIds.map((id) => {
+      const caller = nodes.get(id);
+      assert.ok(caller);
+      return caller;
+    });
+    assert.deepEqual(
+      callers.map((caller) => caller.label).sort(),
+      ["callback_event_ops", "dispatch_callback"]
+    );
+    assert.deepEqual(
+      callers
+        .find((caller) => caller.label === "callback_event_ops")
+        ?.references.map((reference) => reference.line),
+      [document.positionAt(callbackOffset).line + 1]
+    );
+    const indirectCallOffset = source.indexOf(
+      "complete(1)",
+      callbackOffset + "complete".length
+    );
+    assert.ok(indirectCallOffset >= 0, "Missing callback-table indirect call fixture");
+    assert.deepEqual(
+      callers
+        .find((caller) => caller.label === "dispatch_callback")
+        ?.references.map((reference) => reference.line),
+      [document.positionAt(indirectCallOffset).line + 1]
+    );
+  });
+
+  test("links a type definition to containing types and function users", async () => {
+    const { api } = await activate();
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "Integration test requires a workspace folder");
+    const uri = vscode.Uri.joinPath(root, "call_chain.hpp");
+    const document = await vscode.workspace.openTextDocument(uri);
+    const source = document.getText();
+    const definitionOffset = source.indexOf("Payload {");
+    assert.ok(definitionOffset >= 0, "Missing contained-type fixture");
+    const position = document.positionAt(definitionOffset);
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(position, position);
+
+    await vscode.commands.executeCommand("symbolDependencyTree.show");
+
+    const state = api.getGraphState();
+    assert.ok(state.rootId, "The type-reference graph has no root");
+    const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+    const graphRoot = nodes.get(state.rootId);
+    assert.ok(graphRoot);
+    const callers = graphRoot.childIds.map((id) => {
+      const caller = nodes.get(id);
+      assert.ok(caller);
+      return caller;
+    });
+    assert.deepEqual(
+      callers.map((caller) => caller.label).sort(),
+      ["PayloadContainer", "consume_payload"]
+    );
+  });
 });

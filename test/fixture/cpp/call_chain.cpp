@@ -52,3 +52,19 @@ int recursive_b(int input) {
 // leaf(input) is not a reference.
 const char* ignored_text = "middle(input) is not a reference";
 const char* ignored_raw = R"cpp(entry(input) is not a reference)cpp";
+
+void callback_impl(int value) {
+  global_total += value;
+}
+
+CallbackOps callback_event_ops = {
+  .complete = callback_impl,
+};
+
+void dispatch_callback(CallbackContext *context) {
+  context->event_ops->complete(1);
+}
+
+void consume_payload(Payload *payload) {
+  global_total += payload->value;
+}

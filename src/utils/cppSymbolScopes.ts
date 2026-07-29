@@ -12,23 +12,40 @@ export type IndexedSymbolScope =
       readonly owner: string;
     };
 
+export interface IndexedMemberOwnerPath {
+  readonly rootOwner: string;
+  readonly members: readonly string[];
+}
+
 export interface IndexedSymbolDeclaration {
   readonly name: string;
   readonly offset: number;
   readonly scope: IndexedSymbolScope;
+  readonly typeName?: string;
 }
 
 export interface ScopedIdentifier {
   readonly name: string;
   readonly offset: number;
   readonly scope?: IndexedSymbolScope;
+  readonly memberOwnerPath?: IndexedMemberOwnerPath;
   readonly implicitMemberOwner?: string;
+}
+
+export interface IndexedGlobalInitializer extends CppFunctionDefinition {
+  readonly typeName?: string;
+}
+
+export interface IndexedTypeDefinition extends CppFunctionDefinition {
+  readonly typeKind: "class" | "enum" | "struct" | "union";
 }
 
 export interface CppSymbolScopeScan {
   readonly declarations: readonly IndexedSymbolDeclaration[];
   readonly identifiers: readonly ScopedIdentifier[];
   readonly functionOwners: ReadonlyMap<number, string>;
+  readonly initializers: readonly IndexedGlobalInitializer[];
+  readonly types: readonly IndexedTypeDefinition[];
 }
 
 interface Token {
@@ -39,6 +56,11 @@ interface Token {
 
 interface TypeRange {
   readonly name: string;
+  readonly typeKind: IndexedTypeDefinition["typeKind"];
+  readonly rangeStart: number;
+  readonly rangeEnd: number;
+  readonly selectionStart: number;
+  readonly selectionEnd: number;
   readonly openBrace: number;
   readonly closeBrace: number;
   readonly openTokenIndex: number;
@@ -56,6 +78,11 @@ interface ParsedDeclaration {
   readonly name: string;
   readonly offset: number;
   readonly typeName?: string;
+}
+
+interface GlobalInitializerRange extends IndexedGlobalInitializer {
+  readonly openTokenIndex: number;
+  readonly closeTokenIndex: number;
 }
 
 const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*$/u;
@@ -169,7 +196,7 @@ function normalizedOwner(name: string | undefined): string | undefined {
   return name?.match(/[A-Za-z_][A-Za-z0-9_]*$/u)?.[0];
 }
 
-function typeTagName(tokens: readonly Token[]): string | undefined {
+function typeTagName(tokens: readonly Token[]): Token | undefined {
   const candidates: Token[] = [];
   let parenDepth = 0;
   let bracketDepth = 0;
@@ -214,7 +241,7 @@ function typeTagName(tokens: readonly Token[]): string | undefined {
       !typeIntroducers.has(candidate.text) &&
       !decorationNames.has(candidate.text) &&
       !decorationPattern.test(candidate.text)
-  )?.text ?? candidates[0]?.text;
+  ) ?? candidates[0];
 }
 
 function scanTypeRanges(
@@ -222,9 +249,22 @@ function scanTypeRanges(
   bracePairs: ReadonlyMap<number, number>
 ): TypeRange[] {
   const ranges: TypeRange[] = [];
+  let parenDepth = 0;
   for (let index = 0; index < tokens.length - 2; index += 1) {
     const keyword = tokens[index];
-    if (keyword === undefined || !typeIntroducers.has(keyword.text)) {
+    if (keyword?.text === "(") {
+      parenDepth += 1;
+      continue;
+    }
+    if (keyword?.text === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+    if (
+      keyword === undefined ||
+      parenDepth > 0 ||
+      !typeIntroducers.has(keyword.text)
+    ) {
       continue;
     }
     const headerTokens: Token[] = [];
@@ -241,6 +281,9 @@ function scanTypeRanges(
       if (leading !== undefined) {
         headerTokens.unshift(leading);
       }
+      if (headerTokens.some((headerToken) => headerToken.text === "=")) {
+        break;
+      }
       const name = typeTagName(headerTokens);
       const closeTokenIndex = bracePairs.get(cursor);
       const close = closeTokenIndex === undefined ? undefined : tokens[closeTokenIndex];
@@ -250,7 +293,15 @@ function scanTypeRanges(
         close !== undefined
       ) {
         ranges.push({
-          name,
+          name: name.text,
+          typeKind: keyword.text as IndexedTypeDefinition["typeKind"],
+          rangeStart: keyword.start,
+          rangeEnd:
+            tokens[closeTokenIndex + 1]?.text === ";"
+              ? tokens[closeTokenIndex + 1]!.end
+              : close.end,
+          selectionStart: name.start,
+          selectionEnd: name.end,
           openBrace: token.start,
           closeBrace: close.start,
           openTokenIndex: cursor,
@@ -594,6 +645,69 @@ function directTypeTokens(
   return statements;
 }
 
+function scanGlobalInitializers(
+  tokens: readonly Token[],
+  bracePairs: ReadonlyMap<number, number>,
+  definitions: readonly CppFunctionDefinition[],
+  typeRanges: readonly TypeRange[]
+): GlobalInitializerRange[] {
+  const initializers: GlobalInitializerRange[] = [];
+  for (let openTokenIndex = 0; openTokenIndex < tokens.length; openTokenIndex += 1) {
+    const open = tokens[openTokenIndex];
+    const equalsIndex = openTokenIndex - 1;
+    if (open?.text !== "{" || tokens[equalsIndex]?.text !== "=") {
+      continue;
+    }
+    const closeTokenIndex = bracePairs.get(openTokenIndex);
+    const close = closeTokenIndex === undefined ? undefined : tokens[closeTokenIndex];
+    if (closeTokenIndex === undefined || close === undefined) {
+      continue;
+    }
+    if (
+      definitions.some(
+        (definition) =>
+          definition.rangeStart <= open.start && open.start < definition.rangeEnd
+      ) ||
+      typeRanges.some(
+        (range) => range.openBrace < open.start && open.start < range.closeBrace
+      ) ||
+      initializers.some(
+        (initializer) =>
+          initializer.openTokenIndex < openTokenIndex &&
+          openTokenIndex < initializer.closeTokenIndex
+      )
+    ) {
+      continue;
+    }
+
+    let declarationStart = equalsIndex - 1;
+    while (
+      declarationStart >= 0 &&
+      ![";", "{", "}"].includes(tokens[declarationStart]?.text ?? "")
+    ) {
+      declarationStart -= 1;
+    }
+    const declarationTokens = tokens.slice(declarationStart + 1, equalsIndex);
+    const declaration = parseDeclarationSegment(declarationTokens).at(-1);
+    if (declaration === undefined) {
+      continue;
+    }
+    const first = declarationTokens[0];
+    const semicolon = tokens[closeTokenIndex + 1];
+    initializers.push({
+      name: declaration.name,
+      typeName: declaration.typeName,
+      rangeStart: first?.start ?? declaration.offset,
+      rangeEnd: semicolon?.text === ";" ? semicolon.end : close.end,
+      selectionStart: declaration.offset,
+      selectionEnd: declaration.offset + declaration.name.length,
+      openTokenIndex,
+      closeTokenIndex
+    });
+  }
+  return initializers;
+}
+
 function parameterTokens(
   tokens: readonly Token[],
   definition: CppFunctionDefinition,
@@ -778,6 +892,51 @@ function visibleLocal(
     .sort((left, right) => right.offset - left.offset)[0];
 }
 
+function ownerPathForReceiver(
+  tokens: readonly Token[],
+  receiverIndex: number,
+  scopeStart: number,
+  declarations: readonly LocalDeclaration[],
+  parents: ReadonlyMap<number, number | undefined>,
+  methodOwner: string | undefined
+): IndexedMemberOwnerPath | undefined {
+  const receiver = tokens[receiverIndex];
+  if (!isIdentifier(receiver)) {
+    return undefined;
+  }
+  if (receiver.text === "this") {
+    return methodOwner === undefined
+      ? undefined
+      : { rootOwner: methodOwner, members: [] };
+  }
+  const nestedOperator = tokens[receiverIndex - 1]?.text;
+  if (nestedOperator === "." || nestedOperator === "->") {
+    const parent = ownerPathForReceiver(
+      tokens,
+      receiverIndex - 2,
+      scopeStart,
+      declarations,
+      parents,
+      methodOwner
+    );
+    if (parent !== undefined) {
+      return {
+        rootOwner: parent.rootOwner,
+        members: [...parent.members, receiver.text]
+      };
+    }
+  }
+  const local = visibleLocal(
+    receiver.text,
+    receiver.start,
+    scopeStart,
+    declarations,
+    parents
+  );
+  const rootOwner = local?.typeName ?? normalizedOwner(receiver.text);
+  return rootOwner === undefined ? undefined : { rootOwner, members: [] };
+}
+
 function ownerForExplicitMember(
   tokens: readonly Token[],
   tokenIndex: number,
@@ -785,30 +944,33 @@ function ownerForExplicitMember(
   declarations: readonly LocalDeclaration[],
   parents: ReadonlyMap<number, number | undefined>,
   methodOwner: string | undefined
-): string | undefined {
+): {
+  readonly owner: string;
+  readonly path?: IndexedMemberOwnerPath;
+} | undefined {
   const operator = tokens[tokenIndex - 1]?.text;
   if (operator === "::") {
-    return normalizedOwner(tokens[tokenIndex - 2]?.text);
+    const owner = normalizedOwner(tokens[tokenIndex - 2]?.text);
+    return owner === undefined ? undefined : { owner };
   }
   if (operator !== "." && operator !== "->") {
     return undefined;
   }
-  const receiver = tokens[tokenIndex - 2];
-  if (!isIdentifier(receiver)) {
+  const path = ownerPathForReceiver(
+    tokens,
+    tokenIndex - 2,
+    scopeStart,
+    declarations,
+    parents,
+    methodOwner
+  );
+  if (path === undefined) {
     return undefined;
   }
-  if (receiver.text === "this") {
-    return methodOwner;
-  }
-  return (
-    visibleLocal(
-      receiver.text,
-      receiver.start,
-      scopeStart,
-      declarations,
-      parents
-    )?.typeName ?? normalizedOwner(receiver.text)
-  );
+  return {
+    owner: path.members.at(-1) ?? path.rootOwner,
+    path: path.members.length === 0 ? undefined : path
+  };
 }
 
 export function scanCppSymbolScopes(
@@ -820,6 +982,12 @@ export function scanCppSymbolScopes(
   const braces = matchingTokenIndexes(tokens, "{", "}");
   const parens = matchingTokenIndexes(tokens, "(", ")");
   const typeRanges = scanTypeRanges(tokens, braces.opensToCloses);
+  const initializerRanges = scanGlobalInitializers(
+    tokens,
+    braces.opensToCloses,
+    definitions,
+    typeRanges
+  );
   const functionOwners = new Map<number, string>();
   for (const definition of definitions) {
     const owner = functionOwner(masked, definition, typeRanges);
@@ -835,13 +1003,35 @@ export function scanCppSymbolScopes(
         declarations.push({
           name: declaration.name,
           offset: declaration.offset,
-          scope: { kind: "member", owner: range.name }
+          scope: { kind: "member", owner: range.name },
+          typeName: declaration.typeName
         });
       }
     }
   }
 
   const identifiers: ScopedIdentifier[] = [];
+  for (const initializer of initializerRanges) {
+    for (
+      let tokenIndex = initializer.openTokenIndex + 1;
+      tokenIndex < initializer.closeTokenIndex;
+      tokenIndex += 1
+    ) {
+      const token = tokens[tokenIndex];
+      if (!isIdentifier(token)) {
+        continue;
+      }
+      const designatedMember =
+        tokens[tokenIndex - 1]?.text === "." && initializer.typeName !== undefined;
+      identifiers.push({
+        name: token.text,
+        offset: token.start,
+        scope: designatedMember
+          ? { kind: "member", owner: initializer.typeName! }
+          : undefined
+      });
+    }
+  }
   for (const definition of definitions) {
     let bodyOpenIndex = tokenIndexAtOrAfter(tokens, definition.selectionEnd);
     while (
@@ -926,7 +1116,8 @@ export function scanCppSymbolScopes(
         identifiers.push({
           name: token.text,
           offset: token.start,
-          scope: { kind: "member", owner: explicitOwner }
+          scope: { kind: "member", owner: explicitOwner.owner },
+          memberOwnerPath: explicitOwner.path
         });
         continue;
       }
@@ -957,5 +1148,21 @@ export function scanCppSymbolScopes(
     }
   }
 
-  return { declarations, identifiers, functionOwners };
+  return {
+    declarations,
+    identifiers,
+    functionOwners,
+    initializers: initializerRanges.map(
+      ({ openTokenIndex: _open, closeTokenIndex: _close, ...initializer }) =>
+        initializer
+    ),
+    types: typeRanges.map((range) => ({
+      name: range.name,
+      typeKind: range.typeKind,
+      rangeStart: range.rangeStart,
+      rangeEnd: range.rangeEnd,
+      selectionStart: range.selectionStart,
+      selectionEnd: range.selectionEnd
+    }))
+  };
 }
