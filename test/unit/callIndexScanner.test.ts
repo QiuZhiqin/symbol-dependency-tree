@@ -115,4 +115,87 @@ describe("persistent call-index scanner", () => {
       }
     ]);
   });
+
+  it("binds same-named local variables to their declaring function and block", () => {
+    const source = `
+int first(void)
+{
+  int a = 1;
+  a += 1;
+  {
+    int a = 2;
+    a += 1;
+  }
+  return a;
+}
+
+int second(void)
+{
+  int a = 3;
+  return a;
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const references = indexed.calls.filter((call) => call.callee === "a");
+    const localKeys = references.map((reference) =>
+      reference.scope?.kind === "local"
+        ? `${reference.scope.functionSelectionStart}:${reference.scope.declarationOffset}`
+        : undefined
+    );
+
+    expect(new Set(localKeys).size).toBe(3);
+    expect(localKeys[0]).toBe(localKeys[1]);
+    expect(localKeys[2]).toBe(localKeys[3]);
+    expect(localKeys[4]).toBe(localKeys[0]);
+    expect(localKeys[5]).toBe(localKeys[6]);
+    expect(localKeys.every((key) => key !== undefined)).toBe(true);
+  });
+
+  it("binds equal member names to the receiver type", () => {
+    const source = `
+struct B {
+  int a;
+  void touch();
+};
+
+struct C {
+  int a;
+};
+
+void B::touch()
+{
+  a += 1;
+}
+
+void update(B *b, C& c)
+{
+  b->a += 1;
+  c.a += 1;
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const members = indexed.declarations
+      .filter((declaration) => declaration.name === "a")
+      .map((declaration) =>
+        declaration.scope.kind === "member"
+          ? declaration.scope.owner
+          : undefined
+      );
+    const references = indexed.calls
+      .filter((call) => call.callee === "a")
+      .map((call) => ({
+        owner:
+          call.scope?.kind === "member"
+            ? call.scope.owner
+            : call.implicitMemberOwner,
+        caller: call.callerName
+      }));
+
+    expect(members).toEqual(["B", "C"]);
+    expect(references).toEqual([
+      { owner: "B", caller: "touch" },
+      { owner: "B", caller: "update" },
+      { owner: "C", caller: "update" }
+    ]);
+  });
 });

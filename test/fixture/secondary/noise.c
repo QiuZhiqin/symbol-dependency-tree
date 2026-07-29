@@ -1,4 +1,5 @@
 int unrelated_secondary_function(void)
 {
-	return 42;
+	int scoped_value = 42;
+	return scoped_value;
 }

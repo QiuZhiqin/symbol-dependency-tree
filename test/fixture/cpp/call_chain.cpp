@@ -8,6 +8,22 @@ void Counter::increment() {
   global_total += value;
 }
 
+int local_scope_one() {
+  int scoped_value = 1;
+  scoped_value += 1;
+  return scoped_value;
+}
+
+int local_scope_two() {
+  int scoped_value = 2;
+  return scoped_value;
+}
+
+void update_members(Counter& counter, AlternateCounter& alternate) {
+  counter.value += 1;
+  alternate.value += 1;
+}
+
 int leaf(int input) {
   int local_total = APPLY_TWICE(input);
   global_total += local_total;

@@ -2,16 +2,24 @@ import {
   scanCppFunctionDefinitions,
   type CppFunctionDefinition
 } from "./cppFunctionScanner";
+import {
+  scanCppSymbolScopes,
+  type IndexedSymbolDeclaration,
+  type IndexedSymbolScope
+} from "./cppSymbolScopes";
 import { maskCppCommentsAndLiterals } from "./textScanner";
 
 export interface IndexedFunctionDefinition extends CppFunctionDefinition {
   readonly isStatic: boolean;
+  readonly memberOwner?: string;
 }
 
 export interface IndexedCallSite {
   readonly callee: string;
   readonly offset: number;
   readonly kind: "callable" | "symbol";
+  readonly scope?: IndexedSymbolScope;
+  readonly implicitMemberOwner?: string;
   readonly callerName: string;
   readonly callerRangeStart: number;
   readonly callerRangeEnd: number;
@@ -22,6 +30,7 @@ export interface IndexedCallSite {
 export interface ScannedCallIndexFile {
   readonly definitions: readonly IndexedFunctionDefinition[];
   readonly calls: readonly IndexedCallSite[];
+  readonly declarations: readonly IndexedSymbolDeclaration[];
 }
 
 const nonCallNames = new Set([
@@ -151,9 +160,15 @@ function neighboringCharacter(
 
 export function scanCallIndexFile(source: string): ScannedCallIndexFile {
   const masked = maskCppCommentsAndLiterals(source);
-  const definitions = scanCppFunctionDefinitions(source).map<IndexedFunctionDefinition>(
+  const rawDefinitions = scanCppFunctionDefinitions(source);
+  const symbolScopes = scanCppSymbolScopes(source, rawDefinitions);
+  const scopedIdentifiers = new Map(
+    symbolScopes.identifiers.map((identifier) => [identifier.offset, identifier])
+  );
+  const definitions = rawDefinitions.map<IndexedFunctionDefinition>(
     (definition) => ({
       ...definition,
+      memberOwner: symbolScopes.functionOwners.get(definition.selectionStart),
       isStatic: /\bstatic\b/u.test(
         masked.slice(definition.rangeStart, definition.selectionStart)
       )
@@ -192,10 +207,15 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
             immediateArgumentOwner !== undefined &&
             !nonCallNames.has(immediateArgumentOwner)));
       const callable = directCall || addressTaken || assignedFunction || bareFunctionArgument;
+      const scopedIdentifier = scopedIdentifiers.get(
+        bodyStart + 1 + localOffset
+      );
       calls.push({
         callee,
         offset: bodyStart + 1 + localOffset,
         kind: callable ? "callable" : "symbol",
+        scope: scopedIdentifier?.scope,
+        implicitMemberOwner: scopedIdentifier?.implicitMemberOwner,
         callerName: caller.name,
         callerRangeStart: caller.rangeStart,
         callerRangeEnd: caller.rangeEnd,
@@ -205,5 +225,9 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
     }
   }
 
-  return { definitions, calls };
+  return {
+    definitions,
+    calls,
+    declarations: symbolScopes.declarations
+  };
 }

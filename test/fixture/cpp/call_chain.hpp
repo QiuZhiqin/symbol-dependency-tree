@@ -8,8 +8,15 @@ struct Counter {
   void increment();
 };
 
+struct AlternateCounter {
+  int value;
+};
+
 extern int global_total;
 
+int local_scope_one();
+int local_scope_two();
+void update_members(Counter& counter, AlternateCounter& alternate);
 int leaf(int input);
 int middle(int input);
 int entry(int input);

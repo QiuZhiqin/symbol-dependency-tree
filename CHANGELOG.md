@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+- Bind local-variable references to their declaration, containing block, function, and file instead of merging equal names workspace-wide.
+- Bind member references reached through `.`, `->`, `::`, or an implicit member-function receiver to the owning type.
+- Keep equal member names on different types separate in the persistent reverse-reference index.
+- Rebuild version 6 of the persistent database automatically so existing workspaces receive the scope-aware schema.
+
 ## 0.6.0
 
 - Store the active index under `.symbol-dependency-tree/` in the first VS Code workspace folder.

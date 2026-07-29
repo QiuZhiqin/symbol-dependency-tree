@@ -10,16 +10,19 @@ import {
   scanCallIndexFile,
   type IndexedFunctionDefinition
 } from "../utils/callIndexScanner";
+import type { IndexedSymbolScope } from "../utils/cppSymbolScopes";
 import { buildExcludeGlob, buildExtensionGlob } from "../utils/exclusions";
 import { shortSymbolName } from "../utils/symbolNames";
 
-const databaseVersion = 5;
+const databaseVersion = 6;
 const updateConcurrency = 12;
 
 interface StoredCallSite {
   readonly callee: string;
   readonly offset: number;
   readonly kind: "callable" | "symbol";
+  readonly scope?: IndexedSymbolScope;
+  readonly implicitMemberOwner?: string;
   readonly callerIndex: number;
 }
 
@@ -95,6 +98,39 @@ function chunks<T>(values: readonly T[], size: number): T[][] {
     result.push(values.slice(index, index + size));
   }
   return result;
+}
+
+function callableKind(kind: vscode.SymbolKind): boolean {
+  return (
+    kind === vscode.SymbolKind.Function ||
+    kind === vscode.SymbolKind.Method ||
+    kind === vscode.SymbolKind.Constructor ||
+    kind === vscode.SymbolKind.Operator
+  );
+}
+
+function callMatchesScope(
+  targetScope: IndexedSymbolScope | undefined,
+  canonicalUri: vscode.Uri,
+  candidate: IndexedCallWithFile
+): boolean {
+  if (targetScope?.kind === "local") {
+    return (
+      candidate.file.uri === canonicalUri.toString() &&
+      candidate.call.scope?.kind === "local" &&
+      candidate.call.scope.functionSelectionStart ===
+        targetScope.functionSelectionStart &&
+      candidate.call.scope.declarationOffset === targetScope.declarationOffset
+    );
+  }
+  if (targetScope?.kind === "member") {
+    return (
+      (candidate.call.scope?.kind === "member" &&
+        candidate.call.scope.owner === targetScope.owner) ||
+      candidate.call.implicitMemberOwner === targetScope.owner
+    );
+  }
+  return candidate.call.scope === undefined;
 }
 
 export class PersistentCallIndex implements vscode.Disposable {
@@ -178,24 +214,26 @@ export class PersistentCallIndex implements vscode.Disposable {
       targetFile === undefined ? undefined : await vscode.workspace.openTextDocument(canonicalUri);
     const canonicalPosition = target.definition?.range.start ?? target.selectionRange.start;
     const targetOffset = targetDocument?.offsetAt(canonicalPosition);
-    const localDefinition =
+    const exactDefinition =
       targetOffset === undefined
         ? undefined
         : targetFile?.definitions.find(
             (definition) =>
               definition.name === queryName &&
-              definition.rangeStart <= targetOffset &&
-              targetOffset < definition.rangeEnd
+              definition.selectionStart <= targetOffset &&
+              targetOffset < definition.selectionEnd
           );
     const sameFileDefinitions =
       targetFile?.definitions.filter((definition) => definition.name === queryName) ?? [];
     const globalDefinitions = this.definitionsByName.get(queryName) ?? [];
+    const targetCanBeCallable =
+      callableKind(target.kind) && target.scope?.kind !== "local";
     const targetDefinition: IndexedDefinitionWithFile | undefined =
-      localDefinition !== undefined
-        ? { file: targetFile!, definition: localDefinition }
-        : sameFileDefinitions.length === 1
+      exactDefinition !== undefined
+        ? { file: targetFile!, definition: exactDefinition }
+        : targetCanBeCallable && sameFileDefinitions.length === 1
           ? { file: targetFile!, definition: sameFileDefinitions[0]! }
-          : globalDefinitions.length === 1
+          : targetCanBeCallable && globalDefinitions.length === 1
             ? globalDefinitions[0]!
             : undefined;
     const staticTarget = targetDefinition?.definition.isStatic === true;
@@ -203,7 +241,8 @@ export class PersistentCallIndex implements vscode.Disposable {
     const candidates = (this.callsByCallee.get(queryName) ?? []).filter(
       (candidate) =>
         (!functionTarget || candidate.call.kind === "callable") &&
-        (!staticTarget || candidate.file.uri === targetDefinition.file.uri)
+        (!staticTarget || candidate.file.uri === targetDefinition.file.uri) &&
+        callMatchesScope(target.scope, canonicalUri, candidate)
     );
     const grouped = new Map<string, IndexedCallWithFile[]>();
     for (const candidate of candidates) {
@@ -251,14 +290,28 @@ export class PersistentCallIndex implements vscode.Disposable {
         )
       }));
       const callerTarget: TargetSymbol = {
-        id: symbolKey(uri, selectionRange, caller.name, vscode.SymbolKind.Function),
+        id: symbolKey(
+          uri,
+          selectionRange,
+          caller.name,
+          caller.memberOwner === undefined
+            ? vscode.SymbolKind.Function
+            : vscode.SymbolKind.Method
+        ),
         name: caller.name,
         displayName: caller.name,
-        kind: vscode.SymbolKind.Function,
+        kind:
+          caller.memberOwner === undefined
+            ? vscode.SymbolKind.Function
+            : vscode.SymbolKind.Method,
         uri,
         range,
         selectionRange,
-        definition: new vscode.Location(uri, selectionRange)
+        definition: new vscode.Location(uri, selectionRange),
+        scope:
+          caller.memberOwner === undefined
+            ? undefined
+            : { kind: "member", owner: caller.memberOwner }
       };
       scopes.push({
         id: callerTarget.id,
@@ -415,7 +468,14 @@ export class PersistentCallIndex implements vscode.Disposable {
         const callerIndex = callerIndexes.get(call.callerSelectionStart);
         return callerIndex === undefined
           ? []
-          : [{ callee: call.callee, offset: call.offset, kind: call.kind, callerIndex }];
+          : [{
+              callee: call.callee,
+              offset: call.offset,
+              kind: call.kind,
+              scope: call.scope,
+              implicitMemberOwner: call.implicitMemberOwner,
+              callerIndex
+            }];
       })
     });
   }

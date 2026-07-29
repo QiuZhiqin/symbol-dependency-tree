@@ -77,7 +77,7 @@ async function sourceCase(): Promise<SourceCase> {
   return {
     uri: vscode.Uri.joinPath(root, "call_chain.cpp"),
     target: "leaf",
-    callers: [{ name: "middle", lines: [18, 19] }]
+    callers: [{ name: "middle", lines: [34, 35] }]
   };
 }
 
@@ -98,7 +98,7 @@ async function secondSourceCase(): Promise<SourceCase> {
   return {
     uri: vscode.Uri.joinPath(root, "call_chain.cpp"),
     target: "middle",
-    callers: [{ name: "entry", lines: [24] }]
+    callers: [{ name: "entry", lines: [40] }]
   };
 }
 
@@ -120,7 +120,7 @@ async function symbolSourceCase(): Promise<SourceCase> {
   return {
     uri: vscode.Uri.joinPath(root, "call_chain.cpp"),
     target: "APPLY_TWICE",
-    callers: [{ name: "leaf", lines: [12] }]
+    callers: [{ name: "leaf", lines: [28] }]
   };
 }
 
@@ -376,5 +376,84 @@ suite("Symbol Dependency Tree integration", () => {
         [...expected.lines]
       );
     }
+  });
+
+  test("keeps a local variable inside its declaring function", async () => {
+    const { api } = await activate();
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "Integration test requires a workspace folder");
+    const uri = vscode.Uri.joinPath(root, "call_chain.cpp");
+    const document = await vscode.workspace.openTextDocument(uri);
+    const source = document.getText();
+    const declarationOffset = source.indexOf("scoped_value");
+    assert.ok(declarationOffset >= 0, "Missing scoped local-variable fixture");
+    const position = document.positionAt(declarationOffset);
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(position, position);
+
+    await vscode.commands.executeCommand("symbolDependencyTree.show");
+
+    const state = api.getGraphState();
+    assert.ok(state.rootId, "The local-variable graph has no root");
+    const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+    const graphRoot = nodes.get(state.rootId);
+    assert.ok(graphRoot);
+    const callers = graphRoot.childIds.map((id) => {
+      const caller = nodes.get(id);
+      assert.ok(caller);
+      return caller;
+    });
+    assert.deepEqual(
+      callers.map((caller) => caller.label),
+      ["local_scope_one"]
+    );
+    assert.deepEqual(
+      callers[0]?.references.map((reference) => reference.line),
+      [12, 13, 14]
+    );
+  });
+
+  test("keeps equal member names separated by their owner type", async () => {
+    const { api } = await activate();
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "Integration test requires a workspace folder");
+    const uri = vscode.Uri.joinPath(root, "call_chain.hpp");
+    const document = await vscode.workspace.openTextDocument(uri);
+    const source = document.getText();
+    const declarationLineOffset = source.indexOf("int value");
+    assert.ok(declarationLineOffset >= 0, "Missing member-variable fixture");
+    const declarationOffset = declarationLineOffset + "int ".length;
+    const position = document.positionAt(declarationOffset);
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(position, position);
+
+    await vscode.commands.executeCommand("symbolDependencyTree.show");
+
+    const state = api.getGraphState();
+    assert.ok(state.rootId, "The member-variable graph has no root");
+    const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+    const graphRoot = nodes.get(state.rootId);
+    assert.ok(graphRoot);
+    const callers = graphRoot.childIds.map((id) => {
+      const caller = nodes.get(id);
+      assert.ok(caller);
+      return caller;
+    });
+    assert.deepEqual(
+      callers.map((caller) => caller.label).sort(),
+      ["increment", "update_members"]
+    );
+    assert.deepEqual(
+      callers
+        .find((caller) => caller.label === "increment")
+        ?.references.map((reference) => reference.line),
+      [7, 8]
+    );
+    assert.deepEqual(
+      callers
+        .find((caller) => caller.label === "update_members")
+        ?.references.map((reference) => reference.line),
+      [23]
+    );
   });
 });

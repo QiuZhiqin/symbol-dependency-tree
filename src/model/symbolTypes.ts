@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import type { IndexedSymbolScope } from "../utils/cppSymbolScopes";
 
 export type QuerySource = "index";
 
@@ -11,6 +12,7 @@ export interface TargetSymbol {
   readonly range: vscode.Range;
   readonly selectionRange: vscode.Range;
   readonly definition?: vscode.Location;
+  readonly scope?: IndexedSymbolScope;
 }
 
 export interface ReferenceHit {
