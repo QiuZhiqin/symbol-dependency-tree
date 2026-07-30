@@ -1,69 +1,69 @@
 # C/C++ Symbol Reference Tree
 
-一个在 VS Code 底部面板中以 Source Insight 风格横向关系图展示 C/C++ 上级调用和符号引用关系的扩展。每次查询都会在底部视图内部创建独立标签，标签标题就是完整目标符号名。
+A VS Code extension that displays C/C++ callers and symbol references as a Source Insight-style horizontal graph in the bottom panel. Each query opens an independent tab whose title is the full target symbol name.
 
-## 功能
+## Features
 
-- 调用查询只读取插件自己的持久化调用数据库，不调用 VS Code Call Hierarchy、References 或工作区全文搜索。
-- 工作区启动后自动加载已有数据库；没有数据库时才在后台建立新索引。
-- 数据库使用字符串表、数字枚举和精确偏移差分后再进行 gzip 无损压缩；Linux `net` 实测由 v10 的 19.06 MiB 降至 v11 的 8.15 MiB。
-- 保存源码后只重新扫描单个文件，并把变化写入小型增量日志；日志达到阈值后才合并完整快照。也可运行 **Rebuild C/C++ Call Index** 强制重建。
-- 动态添加工作区文件夹时只扫描新增根目录，移除文件夹时只剔除对应记录，不再因多根工作区组合变化而使已有索引整体失效。
-- VS Code 最底部的原生状态栏常驻显示索引状态和构建百分比；鼠标悬停可查看文件数、函数数、引用数及详细进度，点击状态栏项可重建索引。
-- 函数指针成员会关联回调表中的初始化赋值和 `ctx->event_ops->callback()` 形式的多级间接调用，成员类型可跨头文件解析。
-- 结构体、类、联合体和枚举可以作为索引根节点；查询类型 `A` 时会列出包含 `A` 的类型以及在参数、返回值或局部声明中使用 `A` 的函数。
-- 节点按需加载并从左向右展开多级上级调用。
-- 关系图固定以 100% 比例显示，支持拖拽和滚轮平移。
-- 每个节点只显示完整函数名，并按实际内容自适应方框宽高；不显示参数、符号类型、目录、文件名或默认行号。
-- 同一调用者存在多个调用位置时显示可点击行号。
-- 单击调用者函数名跳转到它调用父节点函数的位置；双击节点跳转到函数定义。
-- 数据库保存精确调用偏移，文件内 `static` 函数按定义文件约束。
-- 除 `target()` 直接调用外，也索引 `INIT_WORK(..., target)`、`register_callback(target)`、`&target` 和函数指针赋值。
-- 枚举值、对象式宏以及函数体内的其他标识符也保存为精确引用，可按所在函数生成上级关系。
-- 局部变量按声明、代码块、函数和文件限定作用域；同名成员按 `.`、`->`、`::` 接收者或成员函数所属类型分别索引。
-- 查询另一个符号时在底部视图中新建同名标签，原有关系图、展开状态和平移位置保持不变。
+- Call queries read only the extension's persistent call database. They do not invoke VS Code Call Hierarchy, References, or workspace text search.
+- An existing database loads automatically when the workspace starts. A new index is built in the background only when no database exists.
+- The database uses string tables, numeric enums, exact offset delta encoding, and lossless gzip compression. In a test on the Linux `net` tree, this reduced the v10 database from 19.06 MiB to 8.15 MiB in v11.
+- Saving source code rescans only the changed file and writes the changes to a small delta log. A full snapshot is merged only after the log reaches its threshold. Run **Rebuild C/C++ Call Index** to force a full rebuild.
+- Adding a workspace folder scans only the new root, and removing one deletes only its records. Changes to a multi-root workspace no longer invalidate the entire existing index.
+- A native item in the VS Code status bar continuously shows the index state and build percentage. Hover over it to view file, function, and reference counts plus detailed progress. Click it to rebuild the index.
+- Function-pointer members connect callback-table initializers to multi-level indirect calls such as `ctx->event_ops->callback()`. Member types can be resolved across header files.
+- Structs, classes, unions, and enums can be index roots. Querying type `A` lists types that contain `A` and functions that use `A` in parameters, return types, or local declarations.
+- Nodes load on demand and expand through multiple caller levels from left to right.
+- The graph stays at 100% scale and supports drag and mouse-wheel panning.
+- Each node shows only the full function name and automatically sizes its box to fit. Parameters, symbol types, directories, filenames, and default line numbers are hidden.
+- Clickable line numbers appear when a caller contains multiple reference locations.
+- Click a caller function name to jump to the location where it references the parent node. Double-click a node to jump to its definition.
+- The database stores exact reference offsets. File-local `static` functions are scoped to their defining files.
+- In addition to direct calls such as `target()`, the index recognizes `INIT_WORK(..., target)`, `register_callback(target)`, `&target`, and function-pointer assignments.
+- Enum values, object-like macros, and other identifiers inside function bodies are stored as exact references and can generate caller relationships for their containing functions.
+- Local variables are scoped by declaration, block, function, and file. Same-named members are distinguished by the receiver of `.`, `->`, or `::`, or by the owning type of a member function.
+- Querying another symbol opens a new tab with that symbol's name. Existing graphs, expansion states, and pan positions remain unchanged.
 
-## 使用
+## Usage
 
-1. 在 VS Code 中打开 C/C++ 工作区。
-2. 插件会在后台加载已有索引；首次使用或没有数据库时会自动建库。
-3. 把光标放在目标函数或符号名上，从编辑器右键菜单选择 **Generate Symbol Reference Tree**。
-4. 可在 VS Code 最底部查看索引工作情况，悬停查看详情，点击该状态栏项重建索引；在目标符号标签中使用 `+` 逐层展开调用者。
+1. Open a C/C++ workspace in VS Code.
+2. The extension loads an existing index in the background. On first use, or when no database exists, it builds one automatically.
+3. Place the cursor on a target function or symbol and select **Generate Symbol Reference Tree** from the editor context menu.
+4. Monitor indexing in the VS Code status bar. Hover for details, click the status item to rebuild, and use `+` in a symbol tab to expand callers one level at a time.
 
-## 命令
+## Commands
 
-| 命令 | 作用 |
+| Command | Purpose |
 | --- | --- |
-| `symbolDependencyTree.show` | 从活动编辑器和光标生成调用树 |
-| `symbolDependencyTree.refresh` | 清除查询缓存并从原位置重新查询 |
-| `symbolDependencyTree.clear` | 关闭当前关系图标签 |
-| `symbolDependencyTree.collapseAll` | 折叠全部节点 |
-| `symbolDependencyTree.rebuildIndex` | 强制重建持久化 C/C++ 调用数据库 |
+| `symbolDependencyTree.show` | Generate a reference tree from the active editor and cursor position |
+| `symbolDependencyTree.refresh` | Clear the query cache and rerun the query from its original location |
+| `symbolDependencyTree.clear` | Close the current graph tab |
+| `symbolDependencyTree.collapseAll` | Collapse all nodes |
+| `symbolDependencyTree.rebuildIndex` | Force a rebuild of the persistent C/C++ call database |
 
-## 配置
+## Configuration
 
-| 设置 | 默认值 | 说明 |
+| Setting | Default | Description |
 | --- | --- | --- |
-| `symbolDependencyTree.persistentIndex.fileExtensions` | 常见 C/C++ 扩展名 | 调用数据库包含的文件扩展名 |
+| `symbolDependencyTree.persistentIndex.fileExtensions` | Common C/C++ extensions | File extensions included in the call database |
 
-数据库默认保存在第一个 VS Code 工作区文件夹中：
+By default, the database is stored in the first VS Code workspace folder:
 
 ```text
-.symbol-dependency-tree/call-index-<工作区哈希>.json.gz
-.symbol-dependency-tree/call-index-<工作区哈希>.delta.json.gz
+.symbol-dependency-tree/call-index-<workspace-hash>.json.gz
+.symbol-dependency-tree/call-index-<workspace-hash>.delta.json.gz
 ```
 
-同时打开多个文件夹时，数据库仍放在工作区列表的第一个文件夹中，文件名哈希只绑定第一个根目录；完整根目录列表保存在数据库内部。新增或移除其他根目录时会在同一数据库中按文件 URI 增量合并。没有打开工作区文件夹时才回退到 VS Code 扩展全局存储。升级后首次使用会无损读取 v10 数据、写出 v11 紧凑快照，并在原子写入成功后清理同一目录中的旧格式和旧组合哈希缓存。
+When multiple folders are open, the database remains in the first folder in the workspace list, and the filename hash is tied only to that first root. The complete root list is stored inside the database. Adding or removing other roots incrementally merges records by file URI into the same database. The extension falls back to VS Code global extension storage only when no workspace folder is open. On first use after an upgrade, it losslessly reads v10 data, writes a compact v11 snapshot, and removes old formats and obsolete multi-root hash caches from the same directory only after the atomic write succeeds.
 
-建议在源码仓库的 `.gitignore` 中加入：
+Add the following entry to the source repository's `.gitignore`:
 
 ```gitignore
 .symbol-dependency-tree/
 ```
 
-数据库不依赖 CodeGraph。
+The database does not depend on CodeGraph.
 
-## 开发与验证
+## Development and Verification
 
 ```bash
 npm install
@@ -72,17 +72,17 @@ npm run test:integration
 npm run package
 ```
 
-可以通过 `TEST_WORKSPACE_PATH` 让集成测试在真实源码工作区运行。例如，Windows PowerShell：
+Set `TEST_WORKSPACE_PATH` to run integration tests against a real source workspace. For example, in Windows PowerShell:
 
 ```powershell
-$env:TEST_WORKSPACE_PATH = 'D:\code\linux-5.10.220\net'
+$env:TEST_WORKSPACE_PATH = '<test-workspace-path>'
 npm run test:integration
 ```
 
-## 已知边界
+## Known Limitations
 
-- 数据库使用轻量级 C/C++ 词法扫描器，不是完整 Clang AST。
-- 宏和枚举按源码中的精确标识符建立引用，不执行预处理器展开。
-- 编译条件、复杂宏展开、标识符拼接、跨函数传递的函数指针、模板实例化和动态分派可能漏报。
-- 成员所属类型通过源码中的声明和接收者表达式推断；复杂模板、链式临时对象和宏生成的声明可能无法确定所属类型。
-- 跨文件同名全局函数和 C++ 重载目前按函数名合并；文件内 `static` 函数可精确区分。
+- The database uses a lightweight C/C++ lexical scanner, not a complete Clang AST.
+- Macros and enums are referenced by their exact source identifiers; preprocessor expansion is not performed.
+- Conditional compilation, complex macro expansion, identifier concatenation, function pointers passed across functions, template instantiation, and dynamic dispatch may produce missed references.
+- Member ownership is inferred from source declarations and receiver expressions. Complex templates, chained temporary objects, and macro-generated declarations may prevent type resolution.
+- Same-named global functions in different files and C++ overloads are currently merged by function name. File-local `static` functions remain distinct.

@@ -28,44 +28,44 @@ export function indexStatusPresentation(
   switch (status.phase) {
     case "loading":
       return {
-        text: "$(sync~spin) C/C++ 索引：加载中",
-        label: "正在读取磁盘索引",
+        text: "$(sync~spin) C/C++ index: loading",
+        label: "Reading index from disk",
         busy: true
       };
     case "building":
       return {
         text:
           progress === undefined
-            ? "$(sync~spin) C/C++ 索引：扫描中"
-            : `$(sync~spin) C/C++ 索引：${progress.percent}%`,
-        label: progress === undefined ? "正在扫描工作区" : "正在建立索引",
+            ? "$(sync~spin) C/C++ index: scanning"
+            : `$(sync~spin) C/C++ index: ${progress.percent}%`,
+        label: progress === undefined ? "Scanning workspace" : "Building index",
         busy: true,
         progress
       };
     case "ready":
       return {
-        text: "$(database) C/C++ 索引就绪",
-        label: "索引就绪",
+        text: "$(database) C/C++ index ready",
+        label: "Index ready",
         busy: false
       };
     case "cancelled":
       return {
-        text: "$(warning) C/C++ 索引已取消",
-        label: "索引已取消",
+        text: "$(warning) C/C++ index cancelled",
+        label: "Index cancelled",
         busy: false,
         progress
       };
     case "error":
       return {
-        text: "$(error) C/C++ 索引失败",
-        label: "索引失败",
+        text: "$(error) C/C++ index failed",
+        label: "Index failed",
         busy: false,
         progress
       };
     case "idle":
       return {
-        text: "$(database) C/C++ 索引：等待",
-        label: "索引尚未加载",
+        text: "$(database) C/C++ index: waiting",
+        label: "Index not loaded",
         busy: false
       };
   }

@@ -11,8 +11,8 @@ describe("indexStatusPresentation", () => {
         totalFiles: 48
       })
     ).toEqual({
-      text: "$(sync~spin) C/C++ 索引：25%",
-      label: "正在建立索引",
+      text: "$(sync~spin) C/C++ index: 25%",
+      label: "Building index",
       busy: true,
       progress: { processed: 12, total: 48, percent: 25 }
     });

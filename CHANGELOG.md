@@ -8,6 +8,7 @@
 - Migrate compatible version 10 indexes without rescanning unchanged files; Linux `net` measured 19.06 MiB before migration and 8.15 MiB afterward.
 - Remove obsolete workspace-combination and legacy-format caches only after the stable version 11 snapshot has been atomically written.
 - Add a small left inset to graph tabs so full function names remain readable without wasting panel space.
+- Use more compact function nodes, call-site links, and vertical branch spacing so larger graphs fit in the panel.
 
 ## 0.8.7
 

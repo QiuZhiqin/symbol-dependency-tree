@@ -5,6 +5,7 @@
   "version": "0.9.0",
   "publisher": "local",
   "license": "MIT",
+  "icon": "resources/extension-icon.png",
   "engines": {
     "vscode": "^1.95.0"
   },

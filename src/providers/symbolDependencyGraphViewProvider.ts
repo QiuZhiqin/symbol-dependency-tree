@@ -545,16 +545,16 @@ export class SymbolDependencyGraphViewProvider
     .edge { fill: none; stroke: var(--vscode-editorWidget-border); stroke-width: 1.5; }
     .edge.cycle { stroke: var(--vscode-charts-orange); stroke-dasharray: 3 3; }
     #nodes { position: absolute; left: 0; top: 0; }
-    .node { position: absolute; width: max-content; min-width: 48px; min-height: 36px; border: 1px solid var(--vscode-editorWidget-border); border-radius: 6px; background: var(--vscode-editorWidget-background); color: var(--vscode-editorWidget-foreground); box-shadow: 0 2px 7px rgba(0,0,0,.18); cursor: default; text-align: left; }
+    .node { position: absolute; width: max-content; min-width: 44px; min-height: 30px; border: 1px solid var(--vscode-editorWidget-border); border-radius: 5px; background: var(--vscode-editorWidget-background); color: var(--vscode-editorWidget-foreground); box-shadow: 0 2px 6px rgba(0,0,0,.16); cursor: default; text-align: left; }
     .node:hover { border-color: var(--vscode-focusBorder); }
     .node.root { border-left: 4px solid var(--vscode-focusBorder); }
     .node.cycle { border-color: var(--vscode-charts-orange); }
-    .node-main { padding: 8px 10px; min-height: 34px; }
-    .node.expandable .node-main { padding-right: 10px; }
-    .node-title { font-weight: 600; font-size: 13px; line-height: 18px; white-space: nowrap; cursor: pointer; }
+    .node-main { padding: 5px 8px; min-height: 28px; }
+    .node.expandable .node-main { padding-right: 8px; }
+    .node-title { font-weight: 600; font-size: 12px; line-height: 16px; white-space: nowrap; cursor: pointer; }
     .node-title:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
-    .line-links { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 6px; }
-    .line-link { height: 21px; padding: 1px 7px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 4px; color: var(--vscode-textLink-foreground); background: var(--vscode-textCodeBlock-background); cursor: pointer; }
+    .line-links { display: flex; flex-wrap: nowrap; gap: 3px; margin-top: 4px; }
+    .line-link { height: 18px; padding: 0 5px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 3px; color: var(--vscode-textLink-foreground); background: var(--vscode-textCodeBlock-background); font-size: 11px; cursor: pointer; }
     .line-link:hover { color: var(--vscode-textLink-activeForeground); background: var(--vscode-list-hoverBackground); }
     .expand { position: absolute; right: -15px; top: 50%; width: 12px; height: 12px; padding: 0; z-index: 2; display: flex; align-items: center; justify-content: center; transform: translateY(-50%); border: 1px solid var(--vscode-button-border, transparent); border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font-size: 9px; line-height: 1; cursor: pointer; }
     .expand:hover { background: var(--vscode-button-hoverBackground); }
@@ -588,7 +588,7 @@ export class SymbolDependencyGraphViewProvider
     let worldWidth = 1;
     let worldHeight = 1;
     const COLUMN_GAP = 110;
-    const ROW_GAP = 24;
+    const ROW_GAP = 12;
     const layoutVariableWidthGraph = ${layoutVariableWidthGraph.toString()};
     const viewPositions = new Map();
 
