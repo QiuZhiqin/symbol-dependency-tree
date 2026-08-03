@@ -370,6 +370,34 @@ void dispatch(struct roam_app *ctx)
     });
   });
 
+  it("indexes callbacks in positional command-table initializers as callable", () => {
+    const source = `
+int Show_ReptTable_Proc(void *adapter, char *argument)
+{
+  return 0;
+}
+
+struct PRIVATE_SHOW_PROC {
+  const char *name;
+  int (*set_proc)(void *adapter, char *argument);
+};
+
+struct PRIVATE_SHOW_PROC RTMP_PRIVATE_AP_SHOW_SUPPORT_PROC[] = {
+#ifdef MAC_REPEATER_SUPPORT
+  { "rept_table", Show_ReptTable_Proc },
+#endif
+};
+`;
+    const indexed = scanCallIndexFile(source);
+
+    expect(
+      indexed.calls.find((call) => call.callee === "Show_ReptTable_Proc")
+    ).toMatchObject({
+      kind: "callable",
+      callerName: "RTMP_PRIVATE_AP_SHOW_SUPPORT_PROC"
+    });
+  });
+
   it("indexes a type contained by another type and used by a function", () => {
     const source = `
 struct A {

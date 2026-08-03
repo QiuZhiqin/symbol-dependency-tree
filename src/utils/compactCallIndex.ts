@@ -5,7 +5,7 @@ import type {
 } from "../model/persistentIndexTypes";
 import type { IndexedFunctionDefinition } from "./callIndexScanner";
 
-export const compactCallIndexVersion = 11;
+export const compactCallIndexVersion = 12;
 export const legacyCallIndexVersion = 10;
 
 type DefinitionTuple = [

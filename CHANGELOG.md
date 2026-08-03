@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1
+
+- Recognize positional function-pointer entries such as `{ "rept_table", Show_ReptTable_Proc }` as callable references.
+- Rebuild version 12 of the persistent database so previously misclassified callback-table entries are corrected automatically after upgrade.
+- Exclude workspace call-index snapshots from packaged VSIX files.
+
 ## 0.9.0
 
 - Store version 11 snapshots with lossless string interning, numeric enums, tuple records, and exact delta-coded source offsets.

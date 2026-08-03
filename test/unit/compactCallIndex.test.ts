@@ -77,6 +77,7 @@ describe("compact call-index persistence", () => {
 
     const encoded = encodeCompactCallIndex(document);
     expect(isCompactCallIndex(encoded)).toBe(true);
+    expect(isCompactCallIndex({ ...encoded, v: 11 })).toBe(false);
     const decoded = decodeCompactCallIndex(encoded);
 
     expect(decoded.roots).toEqual(document.roots);

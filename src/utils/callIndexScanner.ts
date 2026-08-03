@@ -242,6 +242,10 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
       const directCall = next === "(";
       const addressTaken = previous === "&";
       const assignedFunction = previous === "=" && (next === "," || next === ";");
+      const positionalInitializerFunction =
+        caller.kind === "initializer" &&
+        (previous === "{" || previous === ",") &&
+        (next === "," || next === "}");
       const immediateArgumentOwner =
         previous === "("
           ? /([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*$/u.exec(
@@ -254,7 +258,12 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
           (previous === "(" &&
             immediateArgumentOwner !== undefined &&
             !nonCallNames.has(immediateArgumentOwner)));
-      const callable = directCall || addressTaken || assignedFunction || bareFunctionArgument;
+      const callable =
+        directCall ||
+        addressTaken ||
+        assignedFunction ||
+        positionalInitializerFunction ||
+        bareFunctionArgument;
       const scopedIdentifier = scopedIdentifiers.get(absoluteOffset);
       calls.push({
         callee,
