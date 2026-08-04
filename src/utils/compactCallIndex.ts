@@ -5,7 +5,7 @@ import type {
 } from "../model/persistentIndexTypes";
 import type { IndexedFunctionDefinition } from "./callIndexScanner";
 
-export const compactCallIndexVersion = 12;
+export const compactCallIndexVersion = 15;
 export const legacyCallIndexVersion = 10;
 
 type DefinitionTuple = [
@@ -35,6 +35,9 @@ type CallTuple = [
 ];
 
 type MemberTypeTuple = [owner: number, member: number, typeName: number];
+type ObjectTypeTuple = [name: number, typeName: number];
+type InheritanceTuple = [derived: number, base: number];
+type VirtualMemberTuple = [owner: number, name: number];
 
 type FileTuple = [
   uri: number,
@@ -42,7 +45,10 @@ type FileTuple = [
   size: number,
   definitions: readonly DefinitionTuple[],
   calls: readonly CallTuple[],
-  memberTypes: readonly MemberTypeTuple[]
+  memberTypes: readonly MemberTypeTuple[],
+  objectTypes: readonly ObjectTypeTuple[],
+  inheritances: readonly InheritanceTuple[],
+  virtualMembers: readonly VirtualMemberTuple[]
 ];
 
 interface CompactCallIndexDocument {
@@ -227,6 +233,18 @@ function encodeFile(
       stringId(member.owner),
       stringId(member.member),
       stringId(member.typeName)
+    ]),
+    (file.objectTypes ?? []).map((objectType) => [
+      stringId(objectType.name),
+      stringId(objectType.typeName)
+    ]),
+    (file.inheritances ?? []).map((inheritance) => [
+      stringId(inheritance.derived),
+      stringId(inheritance.base)
+    ]),
+    (file.virtualMembers ?? []).map((member) => [
+      stringId(member.owner),
+      stringId(member.name)
     ])
   ];
 }
@@ -303,6 +321,18 @@ function decodeFile(
       owner: requireString(strings, member[0]),
       member: requireString(strings, member[1]),
       typeName: requireString(strings, member[2])
+    })),
+    objectTypes: file[6].map((objectType) => ({
+      name: requireString(strings, objectType[0]),
+      typeName: requireString(strings, objectType[1])
+    })),
+    inheritances: file[7].map((inheritance) => ({
+      derived: requireString(strings, inheritance[0]),
+      base: requireString(strings, inheritance[1])
+    })),
+    virtualMembers: file[8].map((member) => ({
+      owner: requireString(strings, member[0]),
+      name: requireString(strings, member[1])
     }))
   };
 }

@@ -31,6 +31,10 @@ import {
 } from "../utils/compressedJson";
 import { buildExcludeGlob, buildExtensionGlob } from "../utils/exclusions";
 import { shortSymbolName } from "../utils/symbolNames";
+import {
+  virtualMemberKey,
+  virtualMemberOwnersMatch
+} from "../utils/virtualDispatch";
 
 const updateConcurrency = 12;
 const journalCompactionEntries = 256;
@@ -154,7 +158,11 @@ function callMatchesScope(
   targetMemberOwnerPath: IndexedMemberOwnerPath | undefined,
   canonicalUri: vscode.Uri,
   candidate: IndexedCallWithFile,
-  memberTypes: ReadonlyMap<string, string | undefined>
+  memberName: string,
+  memberTypes: ReadonlyMap<string, string | undefined>,
+  objectTypes: ReadonlyMap<string, string | undefined>,
+  baseTypes: ReadonlyMap<string, ReadonlySet<string>>,
+  virtualMembers: ReadonlySet<string>
 ): boolean {
   if (targetScope?.kind === "local") {
     return (
@@ -169,17 +177,37 @@ function callMatchesScope(
     const targetOwner = resolveMemberOwner(
       targetScope,
       targetMemberOwnerPath,
-      memberTypes
+      memberTypes,
+      objectTypes
     );
     const candidateOwner = resolveMemberOwner(
       candidate.call.scope,
       candidate.call.memberOwnerPath,
-      memberTypes
+      memberTypes,
+      objectTypes
     );
-    return (
-      candidateOwner === targetOwner ||
-      candidate.call.implicitMemberOwner === targetOwner
-    );
+    const explicitMatch =
+      targetOwner !== undefined &&
+      candidateOwner !== undefined &&
+      virtualMemberOwnersMatch(
+        targetOwner,
+        candidateOwner,
+        memberName,
+        baseTypes,
+        virtualMembers
+      );
+    const implicitOwner = candidate.call.implicitMemberOwner;
+    const implicitMatch =
+      targetOwner !== undefined &&
+      implicitOwner !== undefined &&
+      virtualMemberOwnersMatch(
+        targetOwner,
+        implicitOwner,
+        memberName,
+        baseTypes,
+        virtualMembers
+      );
+    return explicitMatch || implicitMatch;
   }
   return candidate.call.scope === undefined;
 }
@@ -191,16 +219,19 @@ function memberTypeKey(owner: string, member: string): string {
 function resolveMemberOwner(
   scope: IndexedSymbolScope | undefined,
   path: IndexedMemberOwnerPath | undefined,
-  memberTypes: ReadonlyMap<string, string | undefined>
+  memberTypes: ReadonlyMap<string, string | undefined>,
+  objectTypes: ReadonlyMap<string, string | undefined>
 ): string | undefined {
   if (scope?.kind !== "member" || path === undefined) {
-    return scope?.kind === "member" ? scope.owner : undefined;
+    return scope?.kind === "member"
+      ? objectTypes.get(scope.owner) ?? scope.owner
+      : undefined;
   }
-  let owner = path.rootOwner;
+  let owner = objectTypes.get(path.rootOwner) ?? path.rootOwner;
   for (const member of path.members) {
     const typeName = memberTypes.get(memberTypeKey(owner, member));
     if (typeName === undefined) {
-      return scope.owner;
+      return objectTypes.get(scope.owner) ?? scope.owner;
     }
     owner = typeName;
   }
@@ -212,6 +243,9 @@ export class PersistentCallIndex implements vscode.Disposable {
   private readonly callsByCallee = new Map<string, IndexedCallWithFile[]>();
   private readonly definitionsByName = new Map<string, IndexedDefinitionWithFile[]>();
   private readonly memberTypes = new Map<string, string | undefined>();
+  private readonly objectTypes = new Map<string, string | undefined>();
+  private readonly baseTypes = new Map<string, Set<string>>();
+  private readonly virtualMembers = new Set<string>();
   private readonly changes = new vscode.EventEmitter<void>();
   private readonly statusChanges = new vscode.EventEmitter<PersistentIndexStatus>();
   private readonly watcher: vscode.FileSystemWatcher;
@@ -386,7 +420,11 @@ export class PersistentCallIndex implements vscode.Disposable {
           target.memberOwnerPath,
           canonicalUri,
           candidate,
-          this.memberTypes
+          queryName,
+          this.memberTypes,
+          this.objectTypes,
+          this.baseTypes,
+          this.virtualMembers
         )
     );
     const grouped = new Map<string, IndexedCallWithFile[]>();
@@ -736,6 +774,12 @@ export class PersistentCallIndex implements vscode.Disposable {
             }]
           : []
       ),
+      inheritances: scanned.inheritances,
+      objectTypes: scanned.objectTypes.map((objectType) => ({
+        name: objectType.name,
+        typeName: objectType.typeName
+      })),
+      virtualMembers: scanned.virtualMembers,
       calls: scanned.calls.flatMap((call) => {
         const callerIndex = callerIndexes.get(call.callerSelectionStart);
         return callerIndex === undefined
@@ -759,6 +803,9 @@ export class PersistentCallIndex implements vscode.Disposable {
     this.callsByCallee.clear();
     this.definitionsByName.clear();
     this.memberTypes.clear();
+    this.objectTypes.clear();
+    this.baseTypes.clear();
+    this.virtualMembers.clear();
     for (const file of this.files.values()) {
       for (const memberType of file.memberTypes) {
         const key = memberTypeKey(memberType.owner, memberType.member);
@@ -767,6 +814,24 @@ export class PersistentCallIndex implements vscode.Disposable {
         } else if (this.memberTypes.get(key) !== memberType.typeName) {
           this.memberTypes.set(key, undefined);
         }
+      }
+      for (const objectType of file.objectTypes ?? []) {
+        if (!this.objectTypes.has(objectType.name)) {
+          this.objectTypes.set(objectType.name, objectType.typeName);
+        } else if (this.objectTypes.get(objectType.name) !== objectType.typeName) {
+          this.objectTypes.set(objectType.name, undefined);
+        }
+      }
+      for (const inheritance of file.inheritances ?? []) {
+        const bases = this.baseTypes.get(inheritance.derived);
+        if (bases === undefined) {
+          this.baseTypes.set(inheritance.derived, new Set([inheritance.base]));
+        } else {
+          bases.add(inheritance.base);
+        }
+      }
+      for (const member of file.virtualMembers ?? []) {
+        this.virtualMembers.add(virtualMemberKey(member.owner, member.name));
       }
     }
     for (const file of this.files.values()) {

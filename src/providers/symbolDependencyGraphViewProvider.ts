@@ -16,6 +16,7 @@ import { extendAncestorPath } from "../utils/cycles";
 import { graphNodeLabel } from "../utils/graphLabels";
 import { layoutVariableWidthGraph } from "../utils/graphLayout";
 import { primaryGraphReference } from "../utils/graphNavigation";
+import { expandReferenceSelection } from "../utils/sourceSelection";
 
 type GraphStatus = GraphStatePayload["status"];
 
@@ -393,9 +394,19 @@ export class SymbolDependencyGraphViewProvider
 
   private async referencePayload(hit: ReferenceHit): Promise<GraphReference> {
     let preview = "File is unavailable";
+    let range = hit.range;
     try {
       const document = await vscode.workspace.openTextDocument(hit.uri);
       preview = document.lineAt(hit.range.start.line).text.trim();
+      const expanded = expandReferenceSelection(
+        document.getText(),
+        document.offsetAt(hit.range.start),
+        document.offsetAt(hit.range.end)
+      );
+      range = new vscode.Range(
+        document.positionAt(expanded.start),
+        document.positionAt(expanded.end)
+      );
     } catch (error) {
       this.output.appendLine(`Unable to read ${hit.uri.toString()}: ${String(error)}`);
     }
@@ -403,7 +414,7 @@ export class SymbolDependencyGraphViewProvider
       uri: hit.uri.toString(),
       path: vscode.workspace.asRelativePath(hit.uri, false),
       line: hit.range.start.line + 1,
-      range: graphRange(hit.range),
+      range: graphRange(range),
       preview
     };
   }

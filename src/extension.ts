@@ -16,6 +16,7 @@ import {
 import { QueryCache } from "./services/queryCache";
 import { ReferenceResolver } from "./services/referenceResolver";
 import { SymbolResolver } from "./services/symbolResolver";
+import { expandReferenceSelection } from "./utils/sourceSelection";
 
 const graphViewId = "symbolDependencyTree.view";
 
@@ -56,12 +57,21 @@ async function openReference(argument: OpenReferenceArgument): Promise<void> {
       return;
     }
     const document = await vscode.workspace.openTextDocument(uri);
+    const expanded = expandReferenceSelection(
+      document.getText(),
+      document.offsetAt(range.start),
+      document.offsetAt(range.end)
+    );
+    const selection = new vscode.Range(
+      document.positionAt(expanded.start),
+      document.positionAt(expanded.end)
+    );
     const editor = await vscode.window.showTextDocument(document, {
       preview: true,
       preserveFocus: false,
-      selection: range
+      selection
     });
-    editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    editor.revealRange(selection, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
   } catch (error) {
     void vscode.window.showErrorMessage(`Unable to open reference: ${String(error)}`);
   }

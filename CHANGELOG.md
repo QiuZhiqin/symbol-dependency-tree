@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.5
+
+- Index C++ base-class relationships and `virtual`/`override` declarations for reverse virtual-dispatch lookup.
+- Link base-typed calls such as `task->handle_ieee1905_1_msg()` to matching derived overrides without merging unrelated or non-virtual methods.
+- Resolve calls through unqualified typed data members and rebuild version 15 of the persistent database automatically after upgrade.
+
+## 0.9.4
+
+- Select the complete source line when opening a graph call site instead of highlighting only the referenced symbol name.
+- Extend selections across multiline calls through the matching closing parenthesis and semicolon.
+- Keep definition navigation precise when opening a node definition directly.
+
+## 0.9.3
+
+- Resolve function-pointer members reached through initialized, uninitialized, pointer, and `extern` global objects back to their declared structure type.
+- Keep wrapper functions such as `vbss_if_get_sta_entry` in the reverse-reference tree and allow their direct callers to be expanded normally.
+- Persist global object type information for cross-file resolution and rebuild version 14 of the database automatically after upgrade.
+
 ## 0.9.1
 
 - Recognize positional function-pointer entries such as `{ "rept_table", Show_ReptTable_Proc }` as callable references.

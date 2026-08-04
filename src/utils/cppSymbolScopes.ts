@@ -36,6 +36,22 @@ export interface IndexedGlobalInitializer extends CppFunctionDefinition {
   readonly typeName?: string;
 }
 
+export interface IndexedObjectType {
+  readonly name: string;
+  readonly offset: number;
+  readonly typeName: string;
+}
+
+export interface IndexedInheritance {
+  readonly derived: string;
+  readonly base: string;
+}
+
+export interface IndexedVirtualMember {
+  readonly owner: string;
+  readonly name: string;
+}
+
 export interface IndexedTypeDefinition extends CppFunctionDefinition {
   readonly typeKind: "class" | "enum" | "struct" | "union";
 }
@@ -45,7 +61,10 @@ export interface CppSymbolScopeScan {
   readonly identifiers: readonly ScopedIdentifier[];
   readonly functionOwners: ReadonlyMap<number, string>;
   readonly initializers: readonly IndexedGlobalInitializer[];
+  readonly inheritances: readonly IndexedInheritance[];
+  readonly objectTypes: readonly IndexedObjectType[];
   readonly types: readonly IndexedTypeDefinition[];
+  readonly virtualMembers: readonly IndexedVirtualMember[];
 }
 
 interface Token {
@@ -56,6 +75,7 @@ interface Token {
 
 interface TypeRange {
   readonly name: string;
+  readonly baseTypes: readonly string[];
   readonly typeKind: IndexedTypeDefinition["typeKind"];
   readonly rangeStart: number;
   readonly rangeEnd: number;
@@ -244,6 +264,36 @@ function typeTagName(tokens: readonly Token[]): Token | undefined {
   ) ?? candidates[0];
 }
 
+function baseTypeNames(tokens: readonly Token[]): string[] {
+  const colon = tokens.findIndex((token) => token.text === ":");
+  if (colon < 0) {
+    return [];
+  }
+  const names: string[] = [];
+  let candidate: string | undefined;
+  let angleDepth = 0;
+  for (let index = colon + 1; index <= tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token?.text === "<") {
+      angleDepth += 1;
+    } else if (token?.text === ">" && angleDepth > 0) {
+      angleDepth -= 1;
+    } else if ((token === undefined || token.text === ",") && angleDepth === 0) {
+      if (candidate !== undefined) {
+        names.push(candidate);
+      }
+      candidate = undefined;
+    } else if (
+      angleDepth === 0 &&
+      isIdentifier(token) &&
+      !["final", "private", "protected", "public", "virtual"].includes(token.text)
+    ) {
+      candidate = token.text;
+    }
+  }
+  return names;
+}
+
 function scanTypeRanges(
   tokens: readonly Token[],
   bracePairs: ReadonlyMap<number, number>
@@ -294,6 +344,7 @@ function scanTypeRanges(
       ) {
         ranges.push({
           name: name.text,
+          baseTypes: baseTypeNames(headerTokens),
           typeKind: keyword.text as IndexedTypeDefinition["typeKind"],
           rangeStart: keyword.start,
           rangeEnd:
@@ -722,6 +773,51 @@ function scanGlobalInitializers(
   return initializers;
 }
 
+function scanFileScopeObjectTypes(
+  tokens: readonly Token[],
+  bracePairs: ReadonlyMap<number, number>,
+  initializers: readonly GlobalInitializerRange[]
+): IndexedObjectType[] {
+  const declarations: ParsedDeclaration[] = initializers.map((initializer) => ({
+    name: initializer.name,
+    offset: initializer.selectionStart,
+    typeName: initializer.typeName
+  }));
+  let statementStart = 0;
+  for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+    const token = tokens[tokenIndex];
+    if (token?.text === "{") {
+      const closeTokenIndex = bracePairs.get(tokenIndex);
+      if (closeTokenIndex !== undefined) {
+        tokenIndex = closeTokenIndex;
+        statementStart = closeTokenIndex + 1;
+      }
+      continue;
+    }
+    if (token?.text !== ";") {
+      continue;
+    }
+    declarations.push(...parseDeclarationSegment(tokens.slice(statementStart, tokenIndex)));
+    statementStart = tokenIndex + 1;
+  }
+  return [
+    ...new Map(
+      declarations.flatMap((declaration) =>
+        declaration.typeName === undefined
+          ? []
+          : [[
+              declaration.offset,
+              {
+                name: declaration.name,
+                offset: declaration.offset,
+                typeName: declaration.typeName
+              } satisfies IndexedObjectType
+            ] as const]
+      )
+    ).values()
+  ];
+}
+
 function parameterTokens(
   tokens: readonly Token[],
   definition: CppFunctionDefinition,
@@ -912,6 +1008,8 @@ function ownerPathForReceiver(
   scopeStart: number,
   declarations: readonly LocalDeclaration[],
   parents: ReadonlyMap<number, number | undefined>,
+  globalTypes: ReadonlyMap<string, string | undefined>,
+  memberTypes: ReadonlyMap<string, string | undefined>,
   methodOwner: string | undefined
 ): IndexedMemberOwnerPath | undefined {
   const receiver = tokens[receiverIndex];
@@ -931,6 +1029,8 @@ function ownerPathForReceiver(
       scopeStart,
       declarations,
       parents,
+      globalTypes,
+      memberTypes,
       methodOwner
     );
     if (parent !== undefined) {
@@ -947,7 +1047,19 @@ function ownerPathForReceiver(
     declarations,
     parents
   );
-  const rootOwner = local?.typeName ?? normalizedOwner(receiver.text);
+  const declaredOwner =
+    local?.typeName ??
+    globalTypes.get(receiver.text) ??
+    (methodOwner === undefined
+      ? undefined
+      : memberTypes.get(`${methodOwner}\u0000${receiver.text}`));
+  if (declaredOwner !== undefined) {
+    return { rootOwner: declaredOwner, members: [] };
+  }
+  if (local === undefined && methodOwner !== undefined) {
+    return { rootOwner: methodOwner, members: [receiver.text] };
+  }
+  const rootOwner = normalizedOwner(receiver.text);
   return rootOwner === undefined ? undefined : { rootOwner, members: [] };
 }
 
@@ -957,6 +1069,8 @@ function ownerForExplicitMember(
   scopeStart: number,
   declarations: readonly LocalDeclaration[],
   parents: ReadonlyMap<number, number | undefined>,
+  globalTypes: ReadonlyMap<string, string | undefined>,
+  memberTypes: ReadonlyMap<string, string | undefined>,
   methodOwner: string | undefined
 ): {
   readonly owner: string;
@@ -976,6 +1090,8 @@ function ownerForExplicitMember(
     scopeStart,
     declarations,
     parents,
+    globalTypes,
+    memberTypes,
     methodOwner
   );
   if (path === undefined) {
@@ -1002,6 +1118,19 @@ export function scanCppSymbolScopes(
     definitions,
     typeRanges
   );
+  const objectTypes = scanFileScopeObjectTypes(
+    tokens,
+    braces.opensToCloses,
+    initializerRanges
+  );
+  const globalTypes = new Map<string, string | undefined>();
+  for (const objectType of objectTypes) {
+    if (!globalTypes.has(objectType.name)) {
+      globalTypes.set(objectType.name, objectType.typeName);
+    } else if (globalTypes.get(objectType.name) !== objectType.typeName) {
+      globalTypes.set(objectType.name, undefined);
+    }
+  }
   const functionOwners = new Map<number, string>();
   for (const definition of definitions) {
     const owner = functionOwner(masked, definition, typeRanges);
@@ -1011,16 +1140,39 @@ export function scanCppSymbolScopes(
   }
 
   const declarations: IndexedSymbolDeclaration[] = [];
+  const virtualMembers: IndexedVirtualMember[] = [];
   for (const range of typeRanges) {
     for (const statement of directTypeTokens(tokens, range)) {
-      for (const declaration of parseDeclarationSegment(statement)) {
+      const parsedDeclarations = parseDeclarationSegment(statement);
+      for (const declaration of parsedDeclarations) {
         declarations.push({
           name: declaration.name,
           offset: declaration.offset,
           scope: { kind: "member", owner: range.name },
           typeName: declaration.typeName
         });
+        if (
+          statement.some((token) => token.text === "virtual" || token.text === "override") &&
+          statement.some(
+            (token, index) =>
+              token.start === declaration.offset && statement[index + 1]?.text === "("
+          )
+        ) {
+          virtualMembers.push({ owner: range.name, name: declaration.name });
+        }
       }
+    }
+  }
+  const memberTypes = new Map<string, string | undefined>();
+  for (const declaration of declarations) {
+    if (declaration.scope.kind !== "member") {
+      continue;
+    }
+    const key = `${declaration.scope.owner}\u0000${declaration.name}`;
+    if (!memberTypes.has(key)) {
+      memberTypes.set(key, declaration.typeName);
+    } else if (memberTypes.get(key) !== declaration.typeName) {
+      memberTypes.set(key, undefined);
     }
   }
 
@@ -1124,6 +1276,8 @@ export function scanCppSymbolScopes(
         scopeStart,
         uniqueLocals,
         lexical.parents,
+        globalTypes,
+        memberTypes,
         methodOwner
       );
       if (explicitOwner !== undefined) {
@@ -1170,6 +1324,10 @@ export function scanCppSymbolScopes(
       ({ openTokenIndex: _open, closeTokenIndex: _close, ...initializer }) =>
         initializer
     ),
+    inheritances: typeRanges.flatMap((range) =>
+      range.baseTypes.map((base) => ({ derived: range.name, base }))
+    ),
+    objectTypes,
     types: typeRanges.map((range) => ({
       name: range.name,
       typeKind: range.typeKind,
@@ -1177,6 +1335,7 @@ export function scanCppSymbolScopes(
       rangeEnd: range.rangeEnd,
       selectionStart: range.selectionStart,
       selectionEnd: range.selectionEnd
-    }))
+    })),
+    virtualMembers
   };
 }

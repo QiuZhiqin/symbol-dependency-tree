@@ -4,10 +4,13 @@ import {
 } from "./cppFunctionScanner";
 import {
   scanCppSymbolScopes,
+  type IndexedInheritance,
   type IndexedMemberOwnerPath,
+  type IndexedObjectType,
   type ScopedIdentifier,
   type IndexedSymbolDeclaration,
-  type IndexedSymbolScope
+  type IndexedSymbolScope,
+  type IndexedVirtualMember
 } from "./cppSymbolScopes";
 import { maskCppCommentsAndLiterals } from "./textScanner";
 
@@ -36,6 +39,9 @@ export interface ScannedCallIndexFile {
   readonly definitions: readonly IndexedFunctionDefinition[];
   readonly calls: readonly IndexedCallSite[];
   readonly declarations: readonly IndexedSymbolDeclaration[];
+  readonly inheritances: readonly IndexedInheritance[];
+  readonly objectTypes: readonly IndexedObjectType[];
+  readonly virtualMembers: readonly IndexedVirtualMember[];
 }
 
 const nonCallNames = new Set([
@@ -284,6 +290,9 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
   return {
     definitions,
     calls,
-    declarations: symbolScopes.declarations
+    declarations: symbolScopes.declarations,
+    inheritances: symbolScopes.inheritances,
+    objectTypes: symbolScopes.objectTypes,
+    virtualMembers: symbolScopes.virtualMembers
   };
 }

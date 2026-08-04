@@ -370,6 +370,200 @@ void dispatch(struct roam_app *ctx)
     });
   });
 
+  it("resolves members reached through a typed global initializer", () => {
+    const source = `
+typedef struct {
+  int (*get_sta_entry)(const char *mac);
+} vbss_operations_t;
+
+static vbss_operations_t g_vbss_ops = {0};
+
+static const vbss_operations_t vbss_7916_ops = {
+  .get_sta_entry = vbss_7916_get_sta_entry,
+};
+
+int vbss_if_get_sta_entry(const char *mac)
+{
+  return g_vbss_ops.get_sta_entry(mac);
+}
+
+void handle_vbss_security_request(const char *mac)
+{
+  vbss_if_get_sta_entry(mac);
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const memberReferences = indexed.calls.filter(
+      (call) => call.callee === "get_sta_entry"
+    );
+
+    expect(memberReferences).toHaveLength(2);
+    expect(memberReferences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          scope: { kind: "member", owner: "vbss_operations_t" },
+          callerName: "vbss_7916_ops"
+        }),
+        expect.objectContaining({
+          kind: "callable",
+          scope: { kind: "member", owner: "vbss_operations_t" },
+          callerName: "vbss_if_get_sta_entry"
+        })
+      ])
+    );
+    expect(
+      indexed.calls.find(
+        (call) =>
+          call.callee === "vbss_if_get_sta_entry" &&
+          call.callerName === "handle_vbss_security_request"
+      )
+    ).toMatchObject({ kind: "callable", scope: undefined });
+  });
+
+  it("resolves members through uninitialized, pointer, and extern global objects", () => {
+    const source = `
+struct transport_ops {
+  void (*send_packet)(void);
+};
+
+static struct transport_ops active_transport;
+extern struct transport_ops *external_transport;
+
+void dispatch_local(void)
+{
+  active_transport.send_packet();
+}
+
+void dispatch_external(void)
+{
+  external_transport->send_packet();
+}
+`;
+    const indexed = scanCallIndexFile(source);
+
+    expect(indexed.objectTypes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "active_transport",
+          typeName: "transport_ops"
+        }),
+        expect.objectContaining({
+          name: "external_transport",
+          typeName: "transport_ops"
+        })
+      ])
+    );
+    expect(
+      indexed.calls
+        .filter((call) => call.callee === "send_packet")
+        .map((call) => ({ callerName: call.callerName, scope: call.scope }))
+    ).toEqual([
+      {
+        callerName: "dispatch_local",
+        scope: { kind: "member", owner: "transport_ops" }
+      },
+      {
+        callerName: "dispatch_external",
+        scope: { kind: "member", owner: "transport_ops" }
+      }
+    ]);
+  });
+
+  it("indexes inheritance, virtual overrides, and base-typed dispatch calls", () => {
+    const source = `
+class Task {
+public:
+  virtual bool handle_message(int value) = 0;
+};
+
+class ClientTask : public Task {
+public:
+  bool handle_message(int value) override;
+};
+
+bool ClientTask::handle_message(int value)
+{
+  return value != 0;
+}
+
+void dispatch(Task *task)
+{
+  task->handle_message(1);
+}
+`;
+    const indexed = scanCallIndexFile(source);
+
+    expect(indexed.inheritances).toContainEqual({
+      derived: "ClientTask",
+      base: "Task"
+    });
+    expect(indexed.virtualMembers).toEqual(
+      expect.arrayContaining([
+        { owner: "Task", name: "handle_message" },
+        { owner: "ClientTask", name: "handle_message" }
+      ])
+    );
+    expect(
+      indexed.calls.find(
+        (call) => call.callee === "handle_message" && call.callerName === "dispatch"
+      )
+    ).toMatchObject({
+      kind: "callable",
+      scope: { kind: "member", owner: "Task" }
+    });
+  });
+
+  it("resolves calls through an unqualified typed data member", () => {
+    const source = `
+class TaskPool {
+public:
+  void handle_message();
+};
+
+class Controller {
+public:
+  void receive();
+private:
+  TaskPool m_pool;
+};
+
+void Controller::receive()
+{
+  m_pool.handle_message();
+}
+`;
+    const indexed = scanCallIndexFile(source);
+
+    expect(
+      indexed.calls.find(
+        (call) => call.callee === "handle_message" && call.callerName === "receive"
+      )
+    ).toMatchObject({
+      kind: "callable",
+      scope: { kind: "member", owner: "TaskPool" }
+    });
+  });
+
+  it("preserves an unqualified member path when its type is declared in another file", () => {
+    const source = `
+void Controller::receive()
+{
+  m_pool.handle_message();
+}
+`;
+    const indexed = scanCallIndexFile(source);
+
+    expect(
+      indexed.calls.find(
+        (call) => call.callee === "handle_message" && call.callerName === "receive"
+      )
+    ).toMatchObject({
+      kind: "callable",
+      scope: { kind: "member", owner: "m_pool" },
+      memberOwnerPath: { rootOwner: "Controller", members: ["m_pool"] }
+    });
+  });
+
   it("indexes callbacks in positional command-table initializers as callable", () => {
     const source = `
 int Show_ReptTable_Proc(void *adapter, char *argument)

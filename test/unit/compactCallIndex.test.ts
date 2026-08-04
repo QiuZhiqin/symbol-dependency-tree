@@ -63,7 +63,10 @@ function fixtureFile(): IndexedFileRecord {
     ],
     memberTypes: [
       { owner: "Context", member: "ops", typeName: "Operations" }
-    ]
+    ],
+    objectTypes: [{ name: "global_context", typeName: "Context" }],
+    inheritances: [{ derived: "Widget", base: "BaseWidget" }],
+    virtualMembers: [{ owner: "BaseWidget", name: "member" }]
   };
 }
 
@@ -77,7 +80,7 @@ describe("compact call-index persistence", () => {
 
     const encoded = encodeCompactCallIndex(document);
     expect(isCompactCallIndex(encoded)).toBe(true);
-    expect(isCompactCallIndex({ ...encoded, v: 11 })).toBe(false);
+    expect(isCompactCallIndex({ ...encoded, v: 14 })).toBe(false);
     const decoded = decodeCompactCallIndex(encoded);
 
     expect(decoded.roots).toEqual(document.roots);
@@ -110,6 +113,15 @@ describe("compact call-index persistence", () => {
         implicitMemberOwner: "Widget",
         callerIndex: 1
       }
+    ]);
+    expect(decoded.files[0]?.objectTypes).toEqual([
+      { name: "global_context", typeName: "Context" }
+    ]);
+    expect(decoded.files[0]?.inheritances).toEqual([
+      { derived: "Widget", base: "BaseWidget" }
+    ]);
+    expect(decoded.files[0]?.virtualMembers).toEqual([
+      { owner: "BaseWidget", name: "member" }
     ]);
   });
 

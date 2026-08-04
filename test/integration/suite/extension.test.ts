@@ -352,7 +352,7 @@ suite("Symbol Dependency Tree integration", () => {
     assert.equal(vscode.window.activeTextEditor?.document.uri.toString(), sample.uri.toString());
     assert.ok(
       vscode.window.activeTextEditor?.selection.isEqual(
-        new vscode.Selection(range.start, range.end)
+        new vscode.Selection(line.range.start, line.range.end)
       )
     );
   });

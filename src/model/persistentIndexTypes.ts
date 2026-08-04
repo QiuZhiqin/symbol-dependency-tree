@@ -20,6 +20,21 @@ export interface StoredMemberType {
   readonly typeName: string;
 }
 
+export interface StoredObjectType {
+  readonly name: string;
+  readonly typeName: string;
+}
+
+export interface StoredInheritance {
+  readonly derived: string;
+  readonly base: string;
+}
+
+export interface StoredVirtualMember {
+  readonly owner: string;
+  readonly name: string;
+}
+
 export interface IndexedFileRecord {
   readonly uri: string;
   readonly mtime: number;
@@ -27,6 +42,9 @@ export interface IndexedFileRecord {
   readonly definitions: readonly IndexedFunctionDefinition[];
   readonly calls: readonly StoredCallSite[];
   readonly memberTypes: readonly StoredMemberType[];
+  readonly inheritances?: readonly StoredInheritance[];
+  readonly objectTypes?: readonly StoredObjectType[];
+  readonly virtualMembers?: readonly StoredVirtualMember[];
 }
 
 export interface PersistentIndexDocument {
