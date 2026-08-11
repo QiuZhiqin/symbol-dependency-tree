@@ -29,7 +29,11 @@ import {
   decodeCompressedOrPlainJson,
   encodeCompressedJson
 } from "../utils/compressedJson";
-import { buildExcludeGlob, buildExtensionGlob } from "../utils/exclusions";
+import {
+  buildExcludeGlob,
+  buildExtensionGlob,
+  normalizeExtension
+} from "../utils/exclusions";
 import { shortSymbolName } from "../utils/symbolNames";
 import {
   virtualMemberKey,
@@ -110,9 +114,9 @@ function sameValues(
   );
 }
 
-function configurationGlobs(): { include: string; exclude: string } {
+function configuredExtensions(): string[] {
   const configuration = vscode.workspace.getConfiguration("symbolDependencyTree");
-  const extensions = configuration.get<string[]>("persistentIndex.fileExtensions", [
+  return configuration.get<string[]>("persistentIndex.fileExtensions", [
     ".c",
     ".cc",
     ".cpp",
@@ -124,6 +128,10 @@ function configurationGlobs(): { include: string; exclude: string } {
     ".inl",
     ".ipp"
   ]);
+}
+
+function configurationGlobs(): { include: string; exclude: string } {
+  const extensions = configuredExtensions();
   const filesExclude = vscode.workspace
     .getConfiguration("files")
     .get<Record<string, boolean>>("exclude");
@@ -134,6 +142,14 @@ function configurationGlobs(): { include: string; exclude: string } {
     include: buildExtensionGlob(extensions),
     exclude: buildExcludeGlob(filesExclude, searchExclude)
   };
+}
+
+function isIndexedUri(uri: vscode.Uri): boolean {
+  const extensions = configuredExtensions().map(normalizeExtension).filter(Boolean);
+  return (
+    extensions.length === 0 ||
+    extensions.some((extension) => uri.path.toLowerCase().endsWith(extension))
+  );
 }
 
 function chunks<T>(values: readonly T[], size: number): T[][] {
@@ -353,6 +369,29 @@ export class PersistentCallIndex implements vscode.Disposable {
     );
     await this.readyPromise;
     return this.stats();
+  }
+
+  public scheduleDocumentUpdate(document: vscode.TextDocument, delayMs = 350): void {
+    const uri = document.uri;
+    if (
+      vscode.workspace.getWorkspaceFolder(uri) === undefined ||
+      !isIndexedUri(uri)
+    ) {
+      return;
+    }
+    this.scheduleMutation(uri, delayMs, () =>
+      document.isClosed ? this.updateFile(uri) : this.updateDocument(document)
+    );
+  }
+
+  public scheduleFileUpdate(uri: vscode.Uri, delayMs = 0): void {
+    if (
+      vscode.workspace.getWorkspaceFolder(uri) === undefined ||
+      !isIndexedUri(uri)
+    ) {
+      return;
+    }
+    this.scheduleMutation(uri, delayMs, () => this.updateFile(uri));
   }
 
   public status(): PersistentIndexStatus {
@@ -755,14 +794,28 @@ export class PersistentCallIndex implements vscode.Disposable {
   ): Promise<IndexedFileRecord> {
     const currentStat = stat ?? (await vscode.workspace.fs.stat(uri));
     const bytes = await vscode.workspace.fs.readFile(uri);
-    const scanned = scanCallIndexFile(Buffer.from(bytes).toString("utf8"));
+    return this.indexSource(
+      uri,
+      Buffer.from(bytes).toString("utf8"),
+      currentStat.mtime,
+      currentStat.size
+    );
+  }
+
+  private indexSource(
+    uri: vscode.Uri,
+    source: string,
+    mtime: number,
+    size: number
+  ): IndexedFileRecord {
+    const scanned = scanCallIndexFile(source);
     const callerIndexes = new Map(
       scanned.definitions.map((definition, index) => [definition.selectionStart, index])
     );
     const indexed: IndexedFileRecord = {
       uri: uri.toString(),
-      mtime: currentStat.mtime,
-      size: currentStat.size,
+      mtime,
+      size,
       definitions: scanned.definitions,
       memberTypes: scanned.declarations.flatMap((declaration) =>
         declaration.scope.kind === "member" &&
@@ -1088,6 +1141,14 @@ export class PersistentCallIndex implements vscode.Disposable {
     if (!this.loaded) {
       return;
     }
+    this.scheduleFileUpdate(uri, 350);
+  }
+
+  private scheduleMutation(
+    uri: vscode.Uri,
+    delayMs: number,
+    mutation: () => Promise<void>
+  ): void {
     const key = uri.toString();
     const existing = this.pendingUpdates.get(key);
     if (existing !== undefined) {
@@ -1097,10 +1158,10 @@ export class PersistentCallIndex implements vscode.Disposable {
       key,
       setTimeout(() => {
         this.pendingUpdates.delete(key);
-        void this.enqueueMutation(() => this.updateFile(uri)).catch(
+        void this.enqueueMutation(mutation).catch(
           (error: unknown) => this.reportBackgroundFailure(error)
         );
-      }, 350)
+      }, delayMs)
     );
   }
 
@@ -1109,7 +1170,16 @@ export class PersistentCallIndex implements vscode.Disposable {
       if (vscode.workspace.getWorkspaceFolder(uri) === undefined) {
         return;
       }
-      const indexed = await this.indexFile(uri);
+      const stat = await vscode.workspace.fs.stat(uri);
+      const existing = this.files.get(uri.toString());
+      if (
+        existing !== undefined &&
+        existing.mtime === stat.mtime &&
+        existing.size === stat.size
+      ) {
+        return;
+      }
+      const indexed = await this.indexFile(uri, stat);
       this.recordUpsert(indexed);
       this.rebuildLookup();
       await this.persistIncremental();
@@ -1122,6 +1192,39 @@ export class PersistentCallIndex implements vscode.Disposable {
         detail: `Unable to update ${uri.fsPath}: ${String(error)}`
       });
       this.output.appendLine(`Persistent index update failed for ${uri.toString()}: ${String(error)}`);
+    }
+  }
+
+  private async updateDocument(document: vscode.TextDocument): Promise<void> {
+    const uri = document.uri;
+    try {
+      if (vscode.workspace.getWorkspaceFolder(uri) === undefined) {
+        return;
+      }
+      const source = document.getText();
+      const bytes = Buffer.from(source, "utf8");
+      const stat = await vscode.workspace.fs.stat(uri);
+      const indexed = this.indexSource(
+        uri,
+        source,
+        document.isDirty ? -document.version : stat.mtime,
+        bytes.byteLength
+      );
+      this.recordUpsert(indexed);
+      this.rebuildLookup();
+      await this.persistIncremental();
+      this.setStatus({ phase: "ready", stats: this.stats() });
+      this.output.appendLine(
+        `Document index updated: ${uri.toString()}${document.isDirty ? " (unsaved)" : ""}`
+      );
+      this.changes.fire();
+    } catch (error) {
+      this.setStatus({
+        phase: "error",
+        stats: this.stats(),
+        detail: `Unable to update ${uri.fsPath}: ${String(error)}`
+      });
+      this.output.appendLine(`Document index update failed for ${uri.toString()}: ${String(error)}`);
     }
   }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.6
+
+- Debounce and index the current in-memory document after every C/C++ editor change, including unsaved edits.
+- Refresh every open graph tab only after the matching index update completes, keeping call-site ranges and navigation synchronized with the source.
+- Reindex saved files immediately and restore the on-disk index when an edited document closes, without relying solely on filesystem watcher delivery.
+
 ## 0.9.5
 
 - Index C++ base-class relationships and `virtual`/`override` declarations for reverse virtual-dispatch lookup.

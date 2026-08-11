@@ -97,6 +97,21 @@ async function waitForIndex(
   return api.getIndexStatus();
 }
 
+async function waitForGraph(
+  api: ExtensionApi,
+  predicate: (state: GraphState) => boolean
+): Promise<GraphState> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const state = api.getGraphState();
+    if (predicate(state)) {
+      return state;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return api.getGraphState();
+}
+
 async function sourceCase(): Promise<SourceCase> {
   const root = vscode.workspace.workspaceFolders?.[0]?.uri;
   assert.ok(root, "Integration test requires a workspace folder");
@@ -254,7 +269,7 @@ suite("Symbol Dependency Tree integration", () => {
     const compactDocument = JSON.parse(
       gunzipSync(compressedBytes).toString("utf8")
     ) as Record<string, unknown>;
-    assert.equal(compactDocument.v, 11);
+    assert.equal(compactDocument.v, 15);
     assert.ok(Array.isArray(compactDocument.s), "Compact index has no string table");
     assert.ok(Array.isArray(compactDocument.f), "Compact index has no file tuples");
     assert.equal("files" in compactDocument, false, "Keyed v10 records were persisted");
@@ -619,6 +634,48 @@ suite("Symbol Dependency Tree integration", () => {
     );
   });
 
+  test("automatically refreshes indexed offsets after an unsaved edit", async () => {
+    const { api } = await activate();
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "Integration test requires a workspace folder");
+    const uri = vscode.Uri.joinPath(root, "call_chain.cpp");
+    if (!(await exists(uri))) {
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(uri);
+    const targetOffset = document.getText().indexOf("leaf(int input)");
+    assert.ok(targetOffset >= 0, "Missing live-update fixture target");
+    const position = document.positionAt(targetOffset);
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(position, position);
+    await vscode.commands.executeCommand("symbolDependencyTree.show");
+
+    const callerLines = (state: GraphState): number[] => {
+      const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+      const graphRoot = state.rootId === undefined ? undefined : nodes.get(state.rootId);
+      return graphRoot?.childIds
+        .map((id) => nodes.get(id))
+        .find((node) => node?.label === "middle")
+        ?.references.map((reference) => reference.line) ?? [];
+    };
+    assert.deepEqual(callerLines(api.getGraphState()), [34, 35]);
+
+    try {
+      assert.equal(
+        await editor.edit((builder) => builder.insert(new vscode.Position(0, 0), "// shift\n")),
+        true
+      );
+      const updated = await waitForGraph(
+        api,
+        (state) => callerLines(state).join(",") === "35,36"
+      );
+      assert.deepEqual(callerLines(updated), [35, 36]);
+    } finally {
+      await vscode.commands.executeCommand("workbench.action.files.revert");
+      await waitForGraph(api, (state) => callerLines(state).join(",") === "34,35");
+    }
+  });
+
   test("updates added and removed workspace roots through the delta journal", async () => {
     const { api } = await activate();
     const folders = vscode.workspace.workspaceFolders;
@@ -702,7 +759,7 @@ suite("Symbol Dependency Tree integration", () => {
     const journalDocument = JSON.parse(
       gunzipSync(journalBytes).toString("utf8")
     ) as Record<string, unknown>;
-    assert.equal(journalDocument.v, 11);
+    assert.equal(journalDocument.v, 15);
     assert.ok(Array.isArray(journalDocument.f));
     assert.ok(Array.isArray(journalDocument.r));
   });

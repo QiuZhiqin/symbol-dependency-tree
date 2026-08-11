@@ -194,6 +194,9 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
 
   const indexChanges = persistentIndex.onDidChange(() => {
     cache.clear();
+    void graphProvider.invalidateAll().catch((error: unknown) => {
+      output.error(`Automatic graph refresh failed: ${String(error)}`);
+    });
   });
   const indexStatusChanges = persistentIndex.onDidStatusChange((status) => {
     indexStatusBar.update(status);
@@ -202,7 +205,15 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
 
   const documentChanges = vscode.workspace.onDidChangeTextDocument((event) => {
     cache.clear();
-    void graphProvider.invalidateUri(event.document.uri);
+    persistentIndex.scheduleDocumentUpdate(event.document);
+  });
+
+  const savedDocuments = vscode.workspace.onDidSaveTextDocument((document) => {
+    persistentIndex.scheduleDocumentUpdate(document, 0);
+  });
+
+  const closedDocuments = vscode.workspace.onDidCloseTextDocument((document) => {
+    persistentIndex.scheduleFileUpdate(document.uri, 0);
   });
 
   const deletedFiles = vscode.workspace.onDidDeleteFiles((event) => {
@@ -226,6 +237,8 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
     indexChanges,
     indexStatusChanges,
     documentChanges,
+    savedDocuments,
+    closedDocuments,
     deletedFiles
   );
 
