@@ -87,6 +87,12 @@ interface TypeRange {
   readonly closeTokenIndex: number;
 }
 
+interface NamespaceRange {
+  readonly name: string;
+  readonly openBrace: number;
+  readonly closeBrace: number;
+}
+
 interface LocalDeclaration {
   readonly name: string;
   readonly offset: number;
@@ -365,10 +371,47 @@ function scanTypeRanges(
   return ranges;
 }
 
+function scanNamespaceRanges(
+  tokens: readonly Token[],
+  bracePairs: ReadonlyMap<number, number>
+): NamespaceRange[] {
+  const ranges: NamespaceRange[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index]?.text !== "namespace") {
+      continue;
+    }
+    let name: Token | undefined;
+    for (let cursor = index + 1; cursor < tokens.length; cursor += 1) {
+      const token = tokens[cursor];
+      if (token?.text === "=" || token?.text === ";") {
+        break;
+      }
+      if (isIdentifier(token)) {
+        name = token;
+      }
+      if (token?.text !== "{") {
+        continue;
+      }
+      const closeTokenIndex = bracePairs.get(cursor);
+      const close = closeTokenIndex === undefined ? undefined : tokens[closeTokenIndex];
+      if (name !== undefined && close !== undefined) {
+        ranges.push({
+          name: name.text,
+          openBrace: token.start,
+          closeBrace: close.start
+        });
+      }
+      break;
+    }
+  }
+  return ranges;
+}
+
 function functionOwner(
   source: string,
   definition: CppFunctionDefinition,
-  typeRanges: readonly TypeRange[]
+  typeRanges: readonly TypeRange[],
+  namespaceRanges: readonly NamespaceRange[]
 ): string | undefined {
   const qualified = /([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)::\s*$/u.exec(
     source.slice(definition.rangeStart, definition.selectionStart)
@@ -377,7 +420,20 @@ function functionOwner(
   if (explicitOwner !== undefined) {
     return explicitOwner;
   }
-  return typeRanges
+  const containingType = typeRanges
+    .filter(
+      (range) =>
+        range.openBrace < definition.selectionStart &&
+        definition.selectionStart < range.closeBrace
+    )
+    .sort(
+      (left, right) =>
+        left.closeBrace - left.openBrace - (right.closeBrace - right.openBrace)
+    )[0]?.name;
+  if (containingType !== undefined) {
+    return containingType;
+  }
+  return namespaceRanges
     .filter(
       (range) =>
         range.openBrace < definition.selectionStart &&
@@ -547,7 +603,9 @@ function parseDeclarationSegment(rawTokens: readonly Token[]): ParsedDeclaration
     if (
       tokens[index - 1]?.text === "(" &&
       (token?.text === "*" || token?.text === "&") &&
-      isIdentifier(tokens[index + 1])
+      isIdentifier(tokens[index + 1]) &&
+      tokens[index + 2]?.text === ")" &&
+      ["(", "[", "=", "{"].includes(tokens[index + 3]?.text ?? "")
     ) {
       const name = tokens[index + 1]!;
       return [
@@ -1112,6 +1170,7 @@ export function scanCppSymbolScopes(
   const braces = matchingTokenIndexes(tokens, "{", "}");
   const parens = matchingTokenIndexes(tokens, "(", ")");
   const typeRanges = scanTypeRanges(tokens, braces.opensToCloses);
+  const namespaceRanges = scanNamespaceRanges(tokens, braces.opensToCloses);
   const initializerRanges = scanGlobalInitializers(
     tokens,
     braces.opensToCloses,
@@ -1133,7 +1192,7 @@ export function scanCppSymbolScopes(
   }
   const functionOwners = new Map<number, string>();
   for (const definition of definitions) {
-    const owner = functionOwner(masked, definition, typeRanges);
+    const owner = functionOwner(masked, definition, typeRanges, namespaceRanges);
     if (owner !== undefined) {
       functionOwners.set(definition.selectionStart, owner);
     }

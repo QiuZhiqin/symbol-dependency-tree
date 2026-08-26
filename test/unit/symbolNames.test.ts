@@ -16,6 +16,10 @@ describe("symbol names", () => {
     expect(shortSymbolName("project::Value::operator +=(const Value&)")).toBe("operator +=");
   });
 
+  it("keeps a destructor distinct from its constructor", () => {
+    expect(shortSymbolName("project::Widget::~Widget() noexcept")).toBe("~Widget");
+  });
+
   it("combines call hierarchy details without treating source paths as signatures", () => {
     expect(fullCallableName("render", "(const Frame&) const")).toBe(
       "render(const Frame&) const"

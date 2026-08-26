@@ -209,6 +209,7 @@ suite("Symbol Dependency Tree integration", () => {
       "symbolDependencyTree.show",
       "symbolDependencyTree.refresh",
       "symbolDependencyTree.clear",
+      "symbolDependencyTree.clearAll",
       "symbolDependencyTree.collapseAll",
       "symbolDependencyTree.openReference",
       "symbolDependencyTree.rebuildIndex"
@@ -269,7 +270,7 @@ suite("Symbol Dependency Tree integration", () => {
     const compactDocument = JSON.parse(
       gunzipSync(compressedBytes).toString("utf8")
     ) as Record<string, unknown>;
-    assert.equal(compactDocument.v, 15);
+    assert.equal(compactDocument.v, 16);
     assert.ok(Array.isArray(compactDocument.s), "Compact index has no string table");
     assert.ok(Array.isArray(compactDocument.f), "Compact index has no file tuples");
     assert.equal("files" in compactDocument, false, "Keyed v10 records were persisted");
@@ -634,6 +635,59 @@ suite("Symbol Dependency Tree integration", () => {
     );
   });
 
+  test("indexes namespace-qualified, template-id, and qualified member calls", async () => {
+    const { api } = await activate();
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "Integration test requires a workspace folder");
+    const uri = vscode.Uri.joinPath(root, "advanced_functions.cpp");
+    if (!(await exists(uri))) {
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(document);
+
+    const showTreeAt = async (needle: string, symbol = needle): Promise<GraphNode[]> => {
+      const needleOffset = document.getText().indexOf(needle);
+      const symbolOffset = needle.indexOf(symbol);
+      const offset = needleOffset < 0 || symbolOffset < 0 ? -1 : needleOffset + symbolOffset;
+      assert.ok(offset >= 0, `Missing advanced C++ fixture target ${needle}`);
+      const position = document.positionAt(offset);
+      editor.selection = new vscode.Selection(position, position);
+      await vscode.commands.executeCommand("symbolDependencyTree.show");
+      const state = api.getGraphState();
+      assert.ok(state.rootId, `No graph root for ${needle}`);
+      const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+      const graphRoot = nodes.get(state.rootId);
+      assert.ok(graphRoot, `Missing graph root node for ${needle}`);
+      return graphRoot.childIds.map((id) => {
+        const caller = nodes.get(id);
+        assert.ok(caller, `Missing caller ${id} for ${needle}`);
+        return caller;
+      });
+    };
+
+    const qualifiedCallers = await showTreeAt("qualified_target(int value)");
+    assert.deepEqual(
+      qualifiedCallers.map((caller) => caller.label).sort(),
+      ["invoke_value", "read"]
+    );
+
+    const templateCallers = await showTreeAt("invoke_value(T value)");
+    assert.deepEqual(
+      templateCallers.map((caller) => caller.label),
+      ["call_template"]
+    );
+
+    const virtualCallers = await showTreeAt(
+      "VbssTask::handle_cmdu()",
+      "handle_cmdu"
+    );
+    assert.deepEqual(
+      virtualCallers.map((caller) => caller.label),
+      ["dispatch_task"]
+    );
+  });
+
   test("automatically refreshes indexed offsets after an unsaved edit", async () => {
     const { api } = await activate();
     const root = vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -759,7 +813,7 @@ suite("Symbol Dependency Tree integration", () => {
     const journalDocument = JSON.parse(
       gunzipSync(journalBytes).toString("utf8")
     ) as Record<string, unknown>;
-    assert.equal(journalDocument.v, 15);
+    assert.equal(journalDocument.v, 16);
     assert.ok(Array.isArray(journalDocument.f));
     assert.ok(Array.isArray(journalDocument.r));
   });

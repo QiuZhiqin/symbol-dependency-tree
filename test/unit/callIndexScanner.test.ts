@@ -163,6 +163,36 @@ int parse_cmdu_message(unsigned char vendor_mtype, unsigned short mtype)
     ).toBe(false);
   });
 
+  it("keeps address-of function arguments bound to their global symbol", () => {
+    const source = `
+struct vbss_1905_vendor_info {
+  int value;
+};
+
+struct vbss_1905_vendor_info g_target_vbss_info;
+
+void update_target(void)
+{
+  struct vbss_1905_vendor_info vbss_info;
+  memcpy(&g_target_vbss_info, &vbss_info, sizeof(struct vbss_1905_vendor_info));
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const reference = indexed.calls.find(
+      (call) => call.callee === "g_target_vbss_info"
+    );
+
+    expect(reference).toMatchObject({
+      callerName: "update_target",
+      scope: undefined
+    });
+    expect(
+      indexed.declarations.some(
+        (declaration) => declaration.name === "g_target_vbss_info"
+      )
+    ).toBe(false);
+  });
+
   it("binds same-named local variables to their declaring function and block", () => {
     const source = `
 int first(void)

@@ -169,6 +169,47 @@ function neighboringCharacter(
   return undefined;
 }
 
+function hasCallParenthesisAfter(
+  source: string,
+  offset: number
+): boolean {
+  let cursor = offset;
+  while (/\s/u.test(source[cursor] ?? "")) {
+    cursor += 1;
+  }
+  if (source[cursor] === "(") {
+    return true;
+  }
+  if (source[cursor] !== "<") {
+    return false;
+  }
+  let depth = 0;
+  for (; cursor < source.length; cursor += 1) {
+    const character = source[cursor];
+    if (character === "<") {
+      depth += 1;
+    } else if (character === ">") {
+      depth -= 1;
+      if (depth === 0) {
+        cursor += 1;
+        while (/\s/u.test(source[cursor] ?? "")) {
+          cursor += 1;
+        }
+        return source[cursor] === "(";
+      }
+    } else if (depth > 0 && [";", "{", "}"].includes(character ?? "")) {
+      return false;
+    }
+  }
+  return false;
+}
+
+function qualifiedPrefixStart(source: string, offset: number): number {
+  const prefix = source.slice(Math.max(0, offset - 192), offset);
+  const qualified = /(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*$/u.exec(prefix)?.[0] ?? "";
+  return offset - qualified.length;
+}
+
 export function scanCallIndexFile(source: string): ScannedCallIndexFile {
   const masked = maskCppCommentsAndLiterals(source);
   const rawDefinitions = scanCppFunctionDefinitions(source);
@@ -243,9 +284,10 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
       ) {
         continue;
       }
-      const previous = neighboringCharacter(body, localOffset - 1, -1);
+      const qualifiedStart = qualifiedPrefixStart(body, localOffset);
+      const previous = neighboringCharacter(body, qualifiedStart - 1, -1);
       const next = neighboringCharacter(body, localOffset + callee.length, 1);
-      const directCall = next === "(";
+      const directCall = hasCallParenthesisAfter(body, localOffset + callee.length);
       const addressTaken = previous === "&";
       const assignedFunction = previous === "=" && (next === "," || next === ";");
       const positionalInitializerFunction =
@@ -255,7 +297,7 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
       const immediateArgumentOwner =
         previous === "("
           ? /([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*$/u.exec(
-              body.slice(Math.max(0, localOffset - 96), localOffset)
+              body.slice(Math.max(0, qualifiedStart - 96), qualifiedStart)
             )?.[1]
           : undefined;
       const bareFunctionArgument =

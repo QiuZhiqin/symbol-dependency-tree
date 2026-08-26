@@ -1,88 +1,92 @@
 # C/C++ Symbol Reference Tree
 
-A VS Code extension that displays C/C++ callers and symbol references as a Source Insight-style horizontal graph in the bottom panel. Each query opens an independent tab whose title is the full target symbol name.
+Explore C/C++ symbol references in a Source Insight-style graph at the bottom of VS Code. Place the cursor on a function, variable, type, or macro to see where it is used, then expand any node with `+` to follow the caller chain one level at a time.
 
-## Features
+## Highlights
 
-- Call queries read only the extension's persistent call database. They do not invoke VS Code Call Hierarchy, References, or workspace text search.
-- An existing database loads automatically when the workspace starts. A new index is built in the background only when no database exists.
-- The database uses string tables, numeric enums, exact offset delta encoding, and lossless gzip compression. In a test on the Linux `net` tree, this reduced the v10 database from 19.06 MiB to 8.15 MiB in v11.
-- Saving source code rescans only the changed file and writes the changes to a small delta log. A full snapshot is merged only after the log reaches its threshold. Run **Rebuild C/C++ Call Index** to force a full rebuild.
-- Adding a workspace folder scans only the new root, and removing one deletes only its records. Changes to a multi-root workspace no longer invalidate the entire existing index.
-- A native item in the VS Code status bar continuously shows the index state and build percentage. Hover over it to view file, function, and reference counts plus detailed progress. Click it to rebuild the index.
-- Function-pointer members connect callback-table initializers to multi-level indirect calls such as `ctx->event_ops->callback()`. Member types can be resolved across header files.
-- Structs, classes, unions, and enums can be index roots. Querying type `A` lists types that contain `A` and functions that use `A` in parameters, return types, or local declarations.
-- Nodes load on demand and expand through multiple caller levels from left to right.
-- The graph stays at 100% scale and supports drag and mouse-wheel panning.
-- Each node shows only the full function name and automatically sizes its box to fit. Parameters, symbol types, directories, filenames, and default line numbers are hidden.
-- Clickable line numbers appear when a caller contains multiple reference locations.
-- Click a caller function name to jump to the location where it references the parent node. Double-click a node to jump to its definition.
-- The database stores exact reference offsets. File-local `static` functions are scoped to their defining files.
-- In addition to direct calls such as `target()`, the index recognizes `INIT_WORK(..., target)`, `register_callback(target)`, `&target`, and function-pointer assignments.
-- Enum values, object-like macros, and other identifiers inside function bodies are stored as exact references and can generate caller relationships for their containing functions.
-- Local variables are scoped by declaration, block, function, and file. Same-named members are distinguished by the receiver of `.`, `->`, or `::`, or by the owning type of a member function.
-- Querying another symbol opens a new tab with that symbol's name. Existing graphs, expansion states, and pan positions remain unchanged.
+- **Explore callers step by step** — Start from any supported symbol and expand its callers from left to right.
+- **Query more than functions** — Functions, methods, variables, structs, classes, unions, enums, macros, and callbacks can all participate in the index.
+- **Follow indirect calls** — Function pointers, callback tables, member callbacks, and common virtual-dispatch patterns are recognized.
+- **Jump directly to source** — Click a caller to open the reference, double-click a node to open its definition, or select a line number when multiple references exist.
+- **Stay synchronized while editing** — The changed file is reindexed automatically when you edit, save, or close it. A full workspace rebuild is not required for normal changes.
+- **Keep multiple investigations open** — Each query opens in its own tab so you can switch between call trees without losing context.
+- **Match your VS Code theme** — Graph colors, text, borders, and backgrounds follow the active VS Code theme.
 
-## Usage
+## Getting Started
 
-1. Open a C/C++ workspace in VS Code.
-2. The extension loads an existing index in the background. On first use, or when no database exists, it builds one automatically.
-3. Place the cursor on a target function or symbol and select **Generate Symbol Reference Tree** from the editor context menu.
-4. Monitor indexing in the VS Code status bar. Hover for details, click the status item to rebuild, and use `+` in a symbol tab to expand callers one level at a time.
+1. Open a C or C++ workspace in VS Code.
+2. Wait for the index status in the status bar to report that it is ready. The first scan can take some time in a large workspace.
+3. Place the cursor on the function, variable, type, or macro you want to inspect.
+4. Right-click in the editor and choose **Generate Symbol Reference Tree**.
+5. In the bottom panel, click `+` beside a node to continue expanding its callers.
+
+## Working with the Graph
+
+| Action | Result |
+| --- | --- |
+| Click a node name | Open the location where that node references its parent |
+| Double-click a node | Open the symbol definition |
+| Click `+` | Load callers or references for that node |
+| Click `−` | Collapse the current branch |
+| Click a line number | Open a specific location when one caller contains multiple references |
+| Drag the canvas | Pan across a large graph |
+| Use the mouse wheel | Move through the graph area |
+
+## Automatic Index Updates
+
+The extension keeps the workspace index up to date automatically:
+
+- While you edit, only the current file is refreshed after a short delay.
+- Saving a file refreshes that file immediately.
+- Creating, deleting, or renaming source files updates the corresponding records.
+- Adding or removing a workspace folder processes only the affected folder.
+
+You normally do not need to rebuild the entire index. Use **Rebuild C/C++ Symbol Index** if the status bar reports a persistent error, the workspace was changed extensively by an external tool while VS Code was closed, or results appear incomplete. You can also click the index item in the status bar to start a rebuild.
+
+## Commonly Supported Patterns
+
+- Direct calls such as `target()`
+- Callback registration such as `register_callback(target)`
+- Function addresses such as `&target`
+- Callback tables and function-pointer assignments
+- Struct or class member callbacks such as `ctx->ops->callback()`
+- Virtual calls through a base-class pointer and matching derived overrides
+- Structs, classes, unions, and enums used in parameters, return values, members, and local declarations
+- Variables, enum values, object-like macros, and other identifiers referenced inside function bodies
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `symbolDependencyTree.show` | Generate a reference tree from the active editor and cursor position |
-| `symbolDependencyTree.refresh` | Clear the query cache and rerun the query from its original location |
-| `symbolDependencyTree.clear` | Close the current graph tab |
-| `symbolDependencyTree.collapseAll` | Collapse all nodes |
-| `symbolDependencyTree.rebuildIndex` | Force a rebuild of the persistent C/C++ call database |
+| **Generate Symbol Reference Tree** | Create a new reference-tree tab from the current cursor position |
+| **Refresh Symbol Reference Tree** | Run the query for the current tab again |
+| **Close All Symbol Trees** | Close every open graph tab at once |
+| **Close Current Symbol Tree** | Close the active graph tab |
+| **Collapse All Nodes** | Collapse every branch in the current graph |
+| **Rebuild C/C++ Symbol Index** | Rescan the entire workspace |
 
-## Configuration
+## Settings
 
-| Setting | Default | Description |
-| --- | --- | --- |
-| `symbolDependencyTree.persistentIndex.fileExtensions` | Common C/C++ extensions | File extensions included in the call database |
+Use `symbolDependencyTree.persistentIndex.fileExtensions` to choose which source-file extensions are indexed. Common C and C++ extensions such as `.c`, `.cpp`, `.h`, and `.hpp` are included by default.
 
-By default, the database is stored in the first VS Code workspace folder:
-
-```text
-.symbol-dependency-tree/call-index-<workspace-hash>.json.gz
-.symbol-dependency-tree/call-index-<workspace-hash>.delta.json.gz
-```
-
-When multiple folders are open, the database remains in the first folder in the workspace list, and the filename hash is tied only to that first root. The complete root list is stored inside the database. Adding or removing other roots incrementally merges records by file URI into the same database. The extension falls back to VS Code global extension storage only when no workspace folder is open. On first use after an upgrade, it losslessly reads v10 data, writes a compact v11 snapshot, and removes old formats and obsolete multi-root hash caches from the same directory only after the atomic write succeeds.
-
-Add the following entry to the source repository's `.gitignore`:
+The index is stored in the `.symbol-dependency-tree` directory under the first workspace folder. Add it to the source repository's `.gitignore`:
 
 ```gitignore
 .symbol-dependency-tree/
 ```
 
-The database does not depend on CodeGraph.
+The index stays on your machine. The extension does not depend on CodeGraph and does not upload source code.
 
-## Development and Verification
+## If a Query Returns No Results
 
-```bash
-npm install
-npm run check
-npm run test:integration
-npm run package
-```
-
-Set `TEST_WORKSPACE_PATH` to run integration tests against a real source workspace. For example, in Windows PowerShell:
-
-```powershell
-$env:TEST_WORKSPACE_PATH = '<test-workspace-path>'
-npm run test:integration
-```
+1. Check the status bar and make sure indexing is ready.
+2. Confirm that the target file extension is included in the extension settings.
+3. Save the current file and run the query again.
+4. If an external tool changed many files, run **Rebuild C/C++ Symbol Index** once.
 
 ## Known Limitations
 
-- The database uses a lightweight C/C++ lexical scanner, not a complete Clang AST.
-- Macros and enums are referenced by their exact source identifiers; preprocessor expansion is not performed.
-- Conditional compilation, complex macro expansion, identifier concatenation, function pointers passed across functions, template instantiation, and dynamic dispatch may produce missed references.
-- Member ownership is inferred from source declarations and receiver expressions. Complex templates, chained temporary objects, and macro-generated declarations may prevent type resolution.
-- Same-named global functions in different files and C++ overloads are currently merged by function name. File-local `static` functions remain distinct.
+- Complex macro expansion, token concatenation, and conditional compilation can hide some references.
+- Function pointers passed through several functions, advanced template instantiation, and macro-generated declarations may not be fully resolved.
+- Same-named global functions and C++ overloads can be merged in some cases. File-local `static` functions remain separate.
+- The extension uses lightweight C/C++ source analysis rather than a complete Clang compilation model.

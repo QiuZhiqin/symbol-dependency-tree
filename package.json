@@ -1,8 +1,8 @@
 {
   "name": "symbol-dependency-tree",
   "displayName": "C/C++ Symbol Reference Tree",
-  "description": "Explore indexed C/C++ callers as a horizontal VS Code graph.",
-  "version": "0.9.6",
+  "description": "Explore callers and references for C/C++ functions, variables, types, macros, and callbacks in a Source Insight-style graph.",
+  "version": "0.9.9",
   "publisher": "ZhiqinQiu",
   "license": "MIT",
   "icon": "resources/extension-icon.png",
@@ -59,12 +59,17 @@
       },
       {
         "command": "symbolDependencyTree.clear",
-        "title": "Clear Symbol Reference Tree",
+        "title": "Close Current Symbol Tree",
         "icon": "$(clear-all)"
       },
       {
+        "command": "symbolDependencyTree.clearAll",
+        "title": "Close All Symbol Trees",
+        "icon": "$(close-all)"
+      },
+      {
         "command": "symbolDependencyTree.collapseAll",
-        "title": "Collapse All",
+        "title": "Collapse All Nodes",
         "icon": "$(collapse-all)"
       },
       {
@@ -73,7 +78,7 @@
       },
       {
         "command": "symbolDependencyTree.rebuildIndex",
-        "title": "Rebuild C/C++ Call Index",
+        "title": "Rebuild C/C++ Symbol Index",
         "icon": "$(database)"
       }
     ],
@@ -92,19 +97,14 @@
           "group": "navigation@10"
         },
         {
-          "command": "symbolDependencyTree.collapseAll",
+          "command": "symbolDependencyTree.clearAll",
           "when": "view == symbolDependencyTree.view",
           "group": "navigation@20"
-        },
-        {
-          "command": "symbolDependencyTree.clear",
-          "when": "view == symbolDependencyTree.view",
-          "group": "navigation@30"
         }
       ]
     },
     "configuration": {
-      "title": "Symbol Dependency Tree",
+      "title": "C/C++ Symbol Reference Tree",
       "properties": {
         "symbolDependencyTree.persistentIndex.fileExtensions": {
           "type": "array",
@@ -123,7 +123,7 @@
             ".inl",
             ".ipp"
           ],
-          "description": "File extensions stored in the persistent caller index."
+          "description": "Source-file extensions included in the symbol index. Rebuild the index after changing this setting."
         }
       }
     }

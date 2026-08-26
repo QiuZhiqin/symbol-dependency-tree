@@ -11,6 +11,8 @@ export interface CppFunctionDefinition {
 const nonFunctionNames = new Set([
   "alignas",
   "catch",
+  "__attribute__",
+  "__declspec",
   "decltype",
   "for",
   "if",
@@ -63,6 +65,19 @@ function matchingCloseBrace(source: string, openBrace: number): number {
   return source.length - 1;
 }
 
+function isFunctionSuffix(source: string): boolean {
+  const suffix = source.trim();
+  if (suffix.length === 0) {
+    return true;
+  }
+  if (/[;{}=]/u.test(suffix)) {
+    return false;
+  }
+  return /^(?:const\b|volatile\b|noexcept\b|override\b|final\b|mutable\b|&|->|requires\b|try\b|\[\[|__attribute__\b|__declspec\b)/u.test(
+    suffix
+  );
+}
+
 function signatureBoundary(source: string, nameStart: number): number {
   let boundary =
     Math.max(
@@ -90,37 +105,48 @@ function functionBeforeBrace(
   source: string,
   openBrace: number
 ): Omit<CppFunctionDefinition, "rangeEnd"> | undefined {
-  const closeParen = skipWhitespaceBackward(source, openBrace - 1);
-  if (source[closeParen] !== ")") {
-    return undefined;
-  }
-  const openParen = matchingOpenParen(source, closeParen);
-  if (openParen === undefined) {
-    return undefined;
-  }
+  let searchFrom = openBrace - 1;
+  while (searchFrom >= 0) {
+    const closeParen = source.lastIndexOf(")", searchFrom);
+    if (closeParen < 0) {
+      return undefined;
+    }
+    const openParen = matchingOpenParen(source, closeParen);
+    if (openParen === undefined) {
+      return undefined;
+    }
+    searchFrom = openParen - 1;
+    if (!isFunctionSuffix(source.slice(closeParen + 1, openBrace))) {
+      continue;
+    }
 
-  const nameEnd = skipWhitespaceBackward(source, openParen - 1) + 1;
-  let nameStart = nameEnd;
-  while (nameStart > 0 && isIdentifierCharacter(source[nameStart - 1])) {
-    nameStart -= 1;
-  }
-  const name = source.slice(nameStart, nameEnd);
-  if (name.length === 0 || nonFunctionNames.has(name)) {
-    return undefined;
-  }
+    const nameEnd = skipWhitespaceBackward(source, openParen - 1) + 1;
+    let nameStart = nameEnd;
+    while (nameStart > 0 && isIdentifierCharacter(source[nameStart - 1])) {
+      nameStart -= 1;
+    }
+    if (source[nameStart - 1] === "~") {
+      nameStart -= 1;
+    }
+    const name = source.slice(nameStart, nameEnd);
+    if (name.length === 0 || nonFunctionNames.has(name)) {
+      continue;
+    }
 
-  const rangeStart = signatureBoundary(source, nameStart);
-  const signature = source.slice(rangeStart, openBrace);
-  if (/^\s*#/mu.test(signature) || /=\s*(?:\[[^\]]*\])?\s*$/u.test(signature)) {
-    return undefined;
-  }
+    const rangeStart = signatureBoundary(source, nameStart);
+    const signature = source.slice(rangeStart, openBrace);
+    if (/^\s*#/mu.test(signature) || /=\s*(?:\[[^\]]*\])?\s*$/u.test(signature)) {
+      continue;
+    }
 
-  return {
-    name,
-    rangeStart,
-    selectionStart: nameStart,
-    selectionEnd: nameEnd
-  };
+    return {
+      name,
+      rangeStart,
+      selectionStart: nameStart,
+      selectionEnd: nameEnd
+    };
+  }
+  return undefined;
 }
 
 export function scanCppFunctionDefinitions(source: string): CppFunctionDefinition[] {

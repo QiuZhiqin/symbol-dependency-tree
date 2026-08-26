@@ -210,6 +210,16 @@ export class SymbolDependencyGraphViewProvider
     }
   }
 
+  public clearAll(): void {
+    for (const document of this.documents.values()) {
+      document.session.dispose();
+    }
+    this.documents.clear();
+    this.documentOrder.splice(0);
+    this.activeDocumentId = undefined;
+    this.postState();
+  }
+
   private closeDocument(id: string): void {
     const document = this.documents.get(id);
     if (document === undefined) {

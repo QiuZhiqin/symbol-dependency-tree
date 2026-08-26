@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.9
+
+- Add the **Close All Symbol Trees** command and panel action to dismiss every open graph tab at once.
+- Keep only **Refresh** and **Close All Symbol Trees** in the panel toolbar; the remaining commands stay available from the command palette.
+
+## 0.9.8
+
+- Keep namespace-owned definitions aligned with qualified calls and index template-id calls such as `invoke<long>()` as callable references.
+- Recognize `const`, `volatile`, `noexcept`, ref-qualified, and trailing-return C++ function definitions.
+- Keep constructors and destructors distinct and recognize qualified member-function addresses such as `&Worker::run`.
+- Recover virtual base-type dispatch through `auto` receivers, preferring the target inheritance family when a receiver variable such as `task` collides with an unrelated lowercase `task` type, while rejecting unsafe same-name virtual hierarchies.
+- Keep address-of function arguments such as `memcpy(&global_value, ...)` bound to the global symbol instead of misclassifying them as local function-pointer declarations.
+- Add advanced C++ unit and integration fixtures, with explicit follow-up cases for overloads, operators, callable wrappers, member pointers, smart pointers, and constructor initializer lists.
+- Add an end-to-end `VbssTask::handle_cmdu` regression fixture modeled on the real prplMesh `TaskPool` dispatch path.
+- Rebuild version 17 of the persistent database automatically after upgrade.
+
+## 0.9.7
+
+- Rewrite the extension overview as a user-focused guide covering supported symbols, graph interaction, automatic index updates, and troubleshooting.
+- Use consistent user-facing labels for the bottom panel, editor commands, index rebuild action, and extension setting.
+
 ## 0.9.6
 
 - Debounce and index the current in-memory document after every C/C++ editor change, including unsaved edits.

@@ -151,6 +151,11 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
     (): void => graphProvider.clear()
   );
 
+  const clearAllCommand = vscode.commands.registerCommand(
+    "symbolDependencyTree.clearAll",
+    (): void => graphProvider.clearAll()
+  );
+
   const collapseCommand = vscode.commands.registerCommand(
     "symbolDependencyTree.collapseAll",
     (): void => graphProvider.collapseAll()
@@ -231,6 +236,7 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
     showCommand,
     refreshCommand,
     clearCommand,
+    clearAllCommand,
     collapseCommand,
     openCommand,
     rebuildIndexCommand,

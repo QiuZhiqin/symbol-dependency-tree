@@ -34,13 +34,14 @@ export class SymbolResolver {
       return undefined;
     }
 
-    const name = shortSymbolName(document.getText(wordRange));
+    const source = document.getText();
+    const wordOffset = document.offsetAt(wordRange.start);
+    const word = document.getText(wordRange);
+    const name = shortSymbolName(source[wordOffset - 1] === "~" ? `~${word}` : word);
     if (name.length === 0) {
       return undefined;
     }
 
-    const source = document.getText();
-    const wordOffset = document.offsetAt(wordRange.start);
     const scanned = scanCallIndexFile(source);
     const exactFunction = scanned.definitions.find(
       (definition) =>
