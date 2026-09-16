@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  definitionOwnerMatchesTarget,
   virtualMemberKey,
   virtualMemberOwnersMatch
 } from "../../src/utils/virtualDispatch";
@@ -121,5 +122,50 @@ describe("virtual dispatch", () => {
         virtualMembers
       )
     ).toBe(false);
+  });
+
+  it("keeps member-scoped targets from binding to an unowned same-name function", () => {
+    expect(
+      definitionOwnerMatchesTarget(
+        "vbss_operations_t",
+        undefined,
+        "vbss_if_get_sta_assoc",
+        baseTypes,
+        virtualMembers
+      )
+    ).toBe(false);
+  });
+
+  it("binds member-scoped targets to same-owner and virtual-family definitions", () => {
+    expect(
+      definitionOwnerMatchesTarget(
+        "vbss_operations_t",
+        "vbss_operations_t",
+        "vbss_if_get_sta_assoc",
+        baseTypes,
+        virtualMembers
+      )
+    ).toBe(true);
+    expect(
+      definitionOwnerMatchesTarget(
+        "SpecialAssociationTask",
+        "AssociationTask",
+        "handle_message",
+        baseTypes,
+        virtualMembers
+      )
+    ).toBe(true);
+  });
+
+  it("keeps unowned function targets binding to unowned definitions", () => {
+    expect(
+      definitionOwnerMatchesTarget(
+        undefined,
+        undefined,
+        "vbss_if_get_sta_assoc",
+        baseTypes,
+        virtualMembers
+      )
+    ).toBe(true);
   });
 });

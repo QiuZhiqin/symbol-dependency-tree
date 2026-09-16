@@ -27,6 +27,7 @@ export interface SymbolDependencyTreeApi {
   readonly getLayoutMeasurements: () => readonly GraphNodeMeasurement[];
   readonly getGraphPanels: () => readonly GraphPanelSnapshot[];
   readonly getIndexStatus: () => PersistentIndexStatus;
+  readonly getRootJumpTarget: () => { uri: string; line: number } | undefined;
 }
 
 interface OpenReferenceArgument {
@@ -80,9 +81,11 @@ async function openReference(argument: OpenReferenceArgument): Promise<void> {
 export function activate(context: vscode.ExtensionContext): SymbolDependencyTreeApi {
   const output = vscode.window.createOutputChannel("Symbol Dependency Tree", { log: true });
   const cache = new QueryCache();
-  const symbolResolver = new SymbolResolver();
   const persistentIndex = new PersistentCallIndex(context.globalStorageUri, output);
   const indexStatusBar = new PersistentIndexStatusBar(persistentIndex.status());
+  const symbolResolver = new SymbolResolver((target, token) =>
+    persistentIndex.resolveMemberDefinition(target, token)
+  );
   const referenceResolver = new ReferenceResolver(persistentIndex, cache);
   const graphProvider = new SymbolDependencyGraphViewProvider(
     context.extensionUri,
@@ -257,7 +260,8 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
     getGraphState: () => graphProvider.snapshot(),
     getLayoutMeasurements: () => graphProvider.layoutMeasurements(),
     getGraphPanels: () => graphProvider.graphTabs(),
-    getIndexStatus: () => persistentIndex.status()
+    getIndexStatus: () => persistentIndex.status(),
+    getRootJumpTarget: () => graphProvider.rootJumpTarget()
   };
 }
 

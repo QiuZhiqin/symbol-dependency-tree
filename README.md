@@ -24,7 +24,7 @@ Explore C/C++ symbol references in a Source Insight-style graph at the bottom of
 
 | Action | Result |
 | --- | --- |
-| Click a node name | Open the location where that node references its parent |
+| Click a node name | Root node: open the symbol definition; other nodes: open the call to the parent |
 | Double-click a node | Open the symbol definition |
 | Click `+` | Load callers or references for that node |
 | Click `−` | Collapse the current branch |

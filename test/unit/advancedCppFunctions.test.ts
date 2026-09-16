@@ -165,6 +165,46 @@ void schedule()
     ]);
   });
 
+  it("indexes a capturing lambda as a local declaration and resolves its calls to it", () => {
+    const source = `
+class ApManager {
+  void handle_virtual_bss_request(int cmdu_rx);
+  void send_cmdu(int cmdu_tx);
+};
+
+void ApManager::handle_virtual_bss_request(int cmdu_rx)
+{
+  auto send_virtual_bss_response = [this](int radio_uid, bool success)
+  {
+    send_cmdu(cmdu_tx);
+  };
+  send_virtual_bss_response(1, true);
+  send_virtual_bss_response(2, false);
+}
+`;
+    const indexed = scanCallIndexFile(source);
+
+    const declaration = indexed.declarations.find(
+      (candidate) => candidate.name === "send_virtual_bss_response"
+    );
+    expect(declaration).toMatchObject({
+      scope: { kind: "local" }
+    });
+    expect(indexed.declarations.find((candidate) => candidate.name === "this"))
+      .toBeUndefined();
+    expect(declaration?.offset).toBe(
+      source.indexOf("send_virtual_bss_response")
+    );
+    for (const call of indexed.calls.filter(
+      (call) => call.callee === "send_virtual_bss_response"
+    )) {
+      expect(call.scope).toMatchObject({
+        kind: "local",
+        declarationOffset: declaration?.offset
+      });
+    }
+  });
+
   it("indexes qualified member-function addresses as callable references", () => {
     const source = `
 class Worker {

@@ -39,6 +39,7 @@ export interface ScopeReference {
 
 export interface ReferenceQueryResult {
   readonly scopes: readonly ScopeReference[];
+  readonly definition?: vscode.Location;
 }
 
 export interface RootOrigin {

@@ -5,6 +5,7 @@ import {
 } from "../model/symbolTypes";
 import { scanCallIndexFile } from "../utils/callIndexScanner";
 import type { IndexedSymbolScope } from "../utils/cppSymbolScopes";
+import { findMacroDefinitionOffset } from "../utils/macroDefinition";
 import { shortSymbolName } from "../utils/symbolNames";
 
 function sameScope(
@@ -19,7 +20,20 @@ function sameScope(
         left.owner === right.owner;
 }
 
+export interface MemberDefinitionLookup {
+  (
+    target: TargetSymbol,
+    token: vscode.CancellationToken
+  ): Promise<vscode.Location | undefined>;
+}
+
 export class SymbolResolver {
+  private readonly memberDefinitionLookup: MemberDefinitionLookup | undefined;
+
+  public constructor(memberDefinitionLookup?: MemberDefinitionLookup) {
+    this.memberDefinitionLookup = memberDefinitionLookup;
+  }
+
   public async resolveAt(
     uri: vscode.Uri,
     position: vscode.Position,
@@ -117,14 +131,40 @@ export class SymbolResolver {
       scope?.kind === "local"
         ? scope.declarationOffset
         : declaration?.offset;
+    const sameFileDefinitions =
+      definitionOffset === undefined && scope === undefined
+        ? scanned.definitions.filter((definition) => definition.name === name)
+        : [];
+    const fallbackDefinition =
+      sameFileDefinitions.length === 1 ? sameFileDefinitions[0] : undefined;
+    const macroOffset =
+      definitionOffset === undefined && fallbackDefinition === undefined
+        ? findMacroDefinitionOffset(source, name)
+        : undefined;
     const selectionRange =
-      definitionOffset === undefined
-        ? wordRange
-        : new vscode.Range(
-            document.positionAt(definitionOffset),
-            document.positionAt(definitionOffset + name.length)
-          );
-    const range = selectionRange;
+      fallbackDefinition !== undefined
+        ? new vscode.Range(
+            document.positionAt(fallbackDefinition.selectionStart),
+            document.positionAt(fallbackDefinition.selectionEnd)
+          )
+        : macroOffset !== undefined
+          ? new vscode.Range(
+              document.positionAt(macroOffset),
+              document.positionAt(macroOffset + name.length)
+            )
+          : definitionOffset === undefined
+            ? wordRange
+            : new vscode.Range(
+                document.positionAt(definitionOffset),
+                document.positionAt(definitionOffset + name.length)
+              );
+    const range =
+      fallbackDefinition !== undefined
+        ? new vscode.Range(
+            document.positionAt(fallbackDefinition.rangeStart),
+            document.positionAt(fallbackDefinition.rangeEnd)
+          )
+        : selectionRange;
     const callable = occurrence?.kind === "callable";
     const kind =
       scope?.kind === "local"
@@ -137,11 +177,13 @@ export class SymbolResolver {
             ? vscode.SymbolKind.Function
             : vscode.SymbolKind.Variable;
     const location =
-      definitionOffset === undefined
-        ? undefined
-        : new vscode.Location(uri, selectionRange);
+      fallbackDefinition !== undefined ||
+      macroOffset !== undefined ||
+      definitionOffset !== undefined
+        ? new vscode.Location(uri, selectionRange)
+        : undefined;
 
-    return {
+    const preliminary: TargetSymbol = {
       id: symbolKey(uri, selectionRange, name, kind),
       name,
       displayName: name,
@@ -153,5 +195,23 @@ export class SymbolResolver {
       scope,
       memberOwnerPath: occurrence?.memberOwnerPath
     };
+
+    const resolved = { ...preliminary, definition: location };
+    if (
+      resolved.definition === undefined &&
+      resolved.memberOwnerPath !== undefined &&
+      this.memberDefinitionLookup !== undefined
+    ) {
+      const memberDefinition = await this.memberDefinitionLookup(resolved, token);
+      if (memberDefinition !== undefined) {
+        return {
+          ...resolved,
+          uri: memberDefinition.uri,
+          selectionRange: memberDefinition.range,
+          definition: memberDefinition
+        };
+      }
+    }
+    return resolved;
   }
 }

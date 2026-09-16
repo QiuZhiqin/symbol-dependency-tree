@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0
+
+- Jump to the symbol definition when clicking a root node name, whether the tree was generated at the definition site or at any call site.
+- Resolve cross-file member-function and macro definitions for root navigation, including `obj.member` receivers and facades such as `g_vbss_ops.vbss_if_get_sta_assoc`.
+- Disambiguate same-name definitions by call arity, so indexing `vbss_if_get_sta_entry` binds the 4-argument facade instead of the 3-argument platform implementation.
+- Treat a bare call inside a member function as a free function when the enclosing class (or its ancestors) never declares that member, keeping namespaces and qualified calls intact.
+- Focus the existing graph tab when re-indexing a symbol that is already open, instead of duplicating the window; the tab identity is the index-bound definition.
+- Add real-source end-to-end regression tests against the prplMesh/libvbss fixtures and a `getRootJumpTarget` automation API.
+
 ## 0.9.9
 
 - Add the **Close All Symbol Trees** command and panel action to dismiss every open graph tab at once.

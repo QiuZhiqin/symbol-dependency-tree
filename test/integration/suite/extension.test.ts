@@ -4,7 +4,7 @@ import { gunzipSync } from "node:zlib";
 import { suite, test } from "mocha";
 import * as vscode from "vscode";
 
-const extensionId = "local.symbol-dependency-tree";
+const extensionId = "ZhiqinQiu.symbol-dependency-tree";
 
 interface GraphReference {
   readonly line: number;
@@ -29,6 +29,7 @@ interface ExtensionApi {
   readonly getLayoutMeasurements: () => readonly GraphNodeMeasurement[];
   readonly getGraphPanels: () => readonly GraphPanelSnapshot[];
   readonly getIndexStatus: () => IndexStatus;
+  readonly getRootJumpTarget: () => { uri: string; line: number } | undefined;
 }
 
 interface IndexStatus {
@@ -270,7 +271,7 @@ suite("Symbol Dependency Tree integration", () => {
     const compactDocument = JSON.parse(
       gunzipSync(compressedBytes).toString("utf8")
     ) as Record<string, unknown>;
-    assert.equal(compactDocument.v, 16);
+    assert.equal(compactDocument.v, 19);
     assert.ok(Array.isArray(compactDocument.s), "Compact index has no string table");
     assert.ok(Array.isArray(compactDocument.f), "Compact index has no file tuples");
     assert.equal("files" in compactDocument, false, "Keyed v10 records were persisted");
@@ -688,6 +689,83 @@ suite("Symbol Dependency Tree integration", () => {
     );
   });
 
+  test("root-node click from a call site jumps to the member definition", async () => {
+    const { api } = await activate();
+    const status = await waitForIndex(api, (current) => current.phase === "ready");
+    assert.equal(status.phase, "ready", "Index must be ready before verifying navigation");
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "Integration test requires a workspace folder");
+    const uri = vscode.Uri.joinPath(root, "call_chain.cpp");
+    const document = await vscode.workspace.openTextDocument(uri);
+    const text = document.getText();
+
+    const callOffset = text.indexOf("handle_vbss_security(cmd)");
+    assert.ok(callOffset >= 0, "Missing member call fixture target");
+    const definitionOffset = text.indexOf("void Messenger::handle_vbss_security");
+    assert.ok(definitionOffset >= 0, "Missing member definition fixture target");
+
+    const editor = await vscode.window.showTextDocument(document);
+    editor.selection = new vscode.Selection(document.positionAt(callOffset), document.positionAt(callOffset));
+    await vscode.commands.executeCommand("symbolDependencyTree.show");
+
+    const state = await waitForGraph(api, (current) =>
+      current.rootId !== undefined && current.nodes.some((node) => node.root)
+    );
+    assert.ok(state.rootId, "No graph root after indexing at the call site");
+    const callLine = document.positionAt(callOffset).line + 1;
+    const definitionLine = document.positionAt(definitionOffset).line + 1;
+
+    const jump = api.getRootJumpTarget();
+    assert.ok(jump, "Root jump target must be available");
+    assert.equal(jump.uri, uri.toString(), "Root click must stay inside the defining file");
+    assert.equal(
+      jump.line,
+      definitionLine,
+      `Root click must jump to the definition (line ${definitionLine}), not the call site (line ${callLine})`
+    );
+    assert.notEqual(jump.line, callLine, "Root click must not navigate back to the call site");
+  });
+
+  test("re-indexing the same symbol focuses its existing tab instead of duplicating", async () => {
+    const { api } = await activate();
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    assert.ok(root, "Integration test requires a workspace folder");
+    const uri = vscode.Uri.joinPath(root, "call_chain.cpp");
+    const document = await vscode.workspace.openTextDocument(uri);
+    const text = document.getText();
+    const editor = await vscode.window.showTextDocument(document);
+
+    const showAt = async (needle: string): Promise<void> => {
+      const offset = text.indexOf(needle);
+      assert.ok(offset >= 0, `Missing fixture needle ${needle}`);
+      const position = document.positionAt(offset);
+      editor.selection = new vscode.Selection(position, position);
+      await vscode.commands.executeCommand("symbolDependencyTree.show");
+    };
+
+    const tabsBefore = api.getGraphPanels().length;
+
+    await showAt("recursive_a(int input)");
+    assert.equal(api.getGraphPanels().length, tabsBefore + 1);
+
+    // The same function indexed from its call site must reuse the tab.
+    await showAt("recursive_a(input - 1)");
+    assert.equal(
+      api.getGraphPanels().length,
+      tabsBefore + 1,
+      "Re-indexing the same symbol must not create a second tab"
+    );
+    const state = api.getGraphState();
+    assert.ok(state.rootId, "The focused tab must still expose its graph");
+    const nodes = new Map(state.nodes.map((node) => [node.id, node]));
+    const graphRoot = state.rootId === undefined ? undefined : nodes.get(state.rootId);
+    assert.equal(graphRoot?.label, "recursive_a");
+
+    // A different symbol still opens its own tab.
+    await showAt("recursive_b(int input)");
+    assert.equal(api.getGraphPanels().length, tabsBefore + 2);
+  });
+
   test("automatically refreshes indexed offsets after an unsaved edit", async () => {
     const { api } = await activate();
     const root = vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -813,7 +891,7 @@ suite("Symbol Dependency Tree integration", () => {
     const journalDocument = JSON.parse(
       gunzipSync(journalBytes).toString("utf8")
     ) as Record<string, unknown>;
-    assert.equal(journalDocument.v, 16);
+    assert.equal(journalDocument.v, 19);
     assert.ok(Array.isArray(journalDocument.f));
     assert.ok(Array.isArray(journalDocument.r));
   });

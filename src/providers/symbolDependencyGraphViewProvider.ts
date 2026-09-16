@@ -8,7 +8,13 @@ import type {
   GraphStatePayload,
   InternalGraphNode
 } from "../model/graphTypes";
-import type { ReferenceHit, RootOrigin, ScopeReference, TargetSymbol } from "../model/symbolTypes";
+import {
+  locationKey,
+  type ReferenceHit,
+  type RootOrigin,
+  type ScopeReference,
+  type TargetSymbol
+} from "../model/symbolTypes";
 import { ReferenceResolver } from "../services/referenceResolver";
 import { QueryCache } from "../services/queryCache";
 import { AnalysisSession } from "../utils/cancellation";
@@ -133,6 +139,31 @@ export class SymbolDependencyGraphViewProvider
     return this.activeDocument()?.measurements ?? [];
   }
 
+  /**
+   * Test/automation surface: the location a root-node name click would open,
+   * mirroring the openNode handler (definition first, selection as fallback).
+   */
+  public rootJumpTarget(): { uri: string; line: number } | undefined {
+    const document = this.activeDocument();
+    const rootId = document?.root?.nodeId;
+    const node = rootId === undefined ? undefined : document?.nodes.get(rootId);
+    const target = node?.target;
+    if (target === undefined) {
+      return undefined;
+    }
+    const definition = target.definition;
+    if (definition !== undefined) {
+      return {
+        uri: definition.uri.toString(),
+        line: definition.range.start.line + 1
+      };
+    }
+    return {
+      uri: target.uri.toString(),
+      line: target.selectionRange.start.line + 1
+    };
+  }
+
   public resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = {
@@ -149,7 +180,60 @@ export class SymbolDependencyGraphViewProvider
     this.postState();
   }
 
+  /**
+   * Stable identity for a tree tab: the index-bound definition when known
+   * (so the same function indexed from its definition or any call site
+   * matches), falling back to the selection identity.
+   */
+  private rootIdentityKey(target: TargetSymbol): string {
+    return target.definition === undefined
+      ? target.id
+      : `${locationKey(target.definition.uri, target.definition.range)}#${target.name}`;
+  }
+
+  private async resolveTargetDefinition(
+    target: TargetSymbol
+  ): Promise<TargetSymbol> {
+    if (target.definition !== undefined) {
+      return target;
+    }
+    // Resolve (from the shared query cache, so the upcoming expansion reuses
+    // the result) to learn where the index binds this call-site target.
+    const source = new vscode.CancellationTokenSource();
+    try {
+      const result = await this.references.resolve(target, source.token);
+      return result.definition === undefined
+        ? target
+        : { ...target, definition: result.definition };
+    } catch {
+      return target;
+    } finally {
+      source.dispose();
+    }
+  }
+
   public async addRoot(target: TargetSymbol, origin: RootOrigin): Promise<void> {
+    const identifiedTarget = await this.resolveTargetDefinition(target);
+    const identityKey = this.rootIdentityKey(identifiedTarget);
+    for (const document of this.documents.values()) {
+      const rootId = document.root?.nodeId;
+      const rootNode = rootId === undefined ? undefined : document.nodes.get(rootId);
+      if (rootId === undefined || rootNode?.target === undefined) {
+        continue;
+      }
+      if (this.rootIdentityKey(rootNode.target) !== identityKey) {
+        continue;
+      }
+      // Re-indexing an already-analyzed symbol focuses its existing tree.
+      document.root = { origin, nodeId: rootId };
+      this.activeDocumentId = document.id;
+      this.postState();
+      if (!rootNode.loaded && !rootNode.loading) {
+        await this.expandNode(document, rootId);
+      }
+      return;
+    }
+    target = identifiedTarget;
     this.documentSequence += 1;
     const id = `tab:${this.documentSequence}`;
     const document: GraphDocument = {
@@ -360,6 +444,15 @@ export class SymbolDependencyGraphViewProvider
         return;
       }
 
+      if (
+        node.root &&
+        node.target !== undefined &&
+        node.target.definition === undefined &&
+        result.definition !== undefined
+      ) {
+        node.target = { ...node.target, definition: result.definition };
+      }
+
       this.removeDescendants(document, node);
       for (const scope of result.scopes) {
         const path = extendAncestorPath(node.ancestorIds, scope.id);
@@ -485,7 +578,12 @@ export class SymbolDependencyGraphViewProvider
           message.nodeId === undefined ? undefined : document.nodes.get(message.nodeId);
         const target = node?.target;
         if (target !== undefined) {
-          await this.openLocation(target.uri, target.selectionRange);
+          const definition = target.definition;
+          if (definition !== undefined) {
+            await this.openLocation(definition.uri, definition.range);
+          } else {
+            await this.openLocation(target.uri, target.selectionRange);
+          }
         }
         break;
       }
@@ -572,10 +670,10 @@ export class SymbolDependencyGraphViewProvider
     .node.cycle { border-color: var(--vscode-charts-orange); }
     .node-main { padding: 5px 8px; min-height: 28px; }
     .node.expandable .node-main { padding-right: 8px; }
-    .node-title { font-weight: 600; font-size: 12px; line-height: 16px; white-space: nowrap; cursor: pointer; }
+    .node-title { display: inline-block; font-weight: 600; font-size: 12px; line-height: 16px; white-space: nowrap; cursor: pointer; }
     .node-title:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
-    .line-links { display: flex; flex-wrap: nowrap; gap: 3px; margin-top: 4px; }
-    .line-link { height: 18px; padding: 0 5px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 3px; color: var(--vscode-textLink-foreground); background: var(--vscode-textCodeBlock-background); font-size: 11px; cursor: pointer; }
+    .line-links { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 3px; }
+    .line-link { height: 15px; padding: 0 3px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 2px; color: var(--vscode-textLink-foreground); background: var(--vscode-textCodeBlock-background); font-size: 10px; line-height: 1; cursor: pointer; }
     .line-link:hover { color: var(--vscode-textLink-activeForeground); background: var(--vscode-list-hoverBackground); }
     .expand { position: absolute; right: -15px; top: 50%; width: 12px; height: 12px; padding: 0; z-index: 2; display: flex; align-items: center; justify-content: center; transform: translateY(-50%); border: 1px solid var(--vscode-button-border, transparent); border-radius: 50%; color: var(--vscode-button-foreground); background: var(--vscode-button-background); font-size: 9px; line-height: 1; cursor: pointer; }
     .expand:hover { background: var(--vscode-button-hoverBackground); }
@@ -644,12 +742,14 @@ export class SymbolDependencyGraphViewProvider
       const title = document.createElement('div');
       title.className = 'node-title';
       title.textContent = node.label;
-      title.title = node.references.length > 0
-        ? 'Open the call to the parent function'
-        : 'Open the function definition';
+      title.title = node.root
+        ? 'Open the symbol definition'
+        : node.references.length > 0
+          ? 'Open the call to the parent function'
+          : 'Open the function definition';
       title.addEventListener('click', event => {
         event.stopPropagation();
-        post({ type: 'openCallSite', nodeId: node.id });
+        post({ type: node.root ? 'openNode' : 'openCallSite', nodeId: node.id });
       });
       title.addEventListener('dblclick', event => event.stopPropagation());
       main.appendChild(title);
@@ -665,7 +765,7 @@ export class SymbolDependencyGraphViewProvider
         for (const reference of uniqueReferences.values()) {
           const line = document.createElement('button');
           line.className = 'line-link';
-          line.textContent = 'L' + reference.line;
+          line.textContent = String(reference.line);
           line.title = reference.path + ':' + reference.line + '\\n' + reference.preview;
           line.addEventListener('click', event => {
             event.stopPropagation();
@@ -753,6 +853,12 @@ export class SymbolDependencyGraphViewProvider
       }
       const sizes = new Map();
       for (const [id, card] of cards) {
+        const title = card.querySelector('.node-title');
+        const links = card.querySelector('.line-links');
+        if (title !== null && links !== null) {
+          const titleWidth = Math.ceil(title.getBoundingClientRect().width);
+          links.style.maxWidth = Math.max(titleWidth, 60) + 'px';
+        }
         const bounds = card.getBoundingClientRect();
         sizes.set(id, {
           width: Math.ceil(bounds.width),

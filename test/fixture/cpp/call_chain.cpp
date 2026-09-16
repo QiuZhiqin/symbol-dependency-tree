@@ -68,3 +68,11 @@ void dispatch_callback(CallbackContext *context) {
 void consume_payload(Payload *payload) {
   global_total += payload->value;
 }
+
+void Messenger::handle_message(int cmd) {
+  handle_vbss_security(cmd);
+}
+
+void Messenger::handle_vbss_security(int cmd) {
+  global_total += cmd;
+}

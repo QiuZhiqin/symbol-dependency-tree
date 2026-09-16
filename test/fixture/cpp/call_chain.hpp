@@ -45,3 +45,8 @@ struct PayloadContainer {
 };
 
 void consume_payload(Payload *payload);
+
+struct Messenger {
+  void handle_message(int cmd);
+  void handle_vbss_security(int cmd);
+};

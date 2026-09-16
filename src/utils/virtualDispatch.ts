@@ -148,3 +148,32 @@ export function virtualMemberOwnersMatch(
 }
 
 export { virtualMemberKey };
+
+/**
+ * Guards the same-file/global definition fallback in index queries: a
+ * member-scoped target such as `g_vbss_ops.vbss_if_get_sta_assoc` must not
+ * bind to an unowned global function that merely shares the member's name
+ * (the facade pattern), while receiver-typed targets still match their
+ * member-function definitions, including virtual base overrides.
+ */
+export function definitionOwnerMatchesTarget(
+  targetMemberOwner: string | undefined,
+  definitionMemberOwner: string | undefined,
+  memberName: string,
+  baseTypes: ReadonlyMap<string, ReadonlySet<string>>,
+  virtualMembers: ReadonlySet<string>
+): boolean {
+  if (targetMemberOwner === undefined) {
+    return true;
+  }
+  return (
+    definitionMemberOwner !== undefined &&
+    virtualMemberOwnersMatch(
+      targetMemberOwner,
+      definitionMemberOwner,
+      memberName,
+      baseTypes,
+      virtualMembers
+    )
+  );
+}

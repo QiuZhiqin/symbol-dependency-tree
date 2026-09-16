@@ -24,7 +24,8 @@ export class ReferenceResolver {
 
     const indexed = await this.persistentIndex.query(target, token);
     const result: ReferenceQueryResult = {
-      scopes: indexed.scopes
+      scopes: indexed.scopes,
+      definition: indexed.targetDefinition
     };
     return this.cache.set(cacheKey, result);
   }

@@ -300,6 +300,19 @@ function baseTypeNames(tokens: readonly Token[]): string[] {
   return names;
 }
 
+function trailingTypeName(
+  tokens: readonly Token[],
+  closeTokenIndex: number
+): Token | undefined {
+  // `typedef struct { ... } Name;` places the type name after the closing
+  // brace, so the header is anonymous and typeTagName finds nothing.
+  const candidate = tokens[closeTokenIndex + 1];
+  return candidate !== undefined && isIdentifier(candidate) &&
+    !typeIntroducers.has(candidate.text)
+    ? candidate
+    : undefined;
+}
+
 function scanTypeRanges(
   tokens: readonly Token[],
   bracePairs: ReadonlyMap<number, number>
@@ -324,7 +337,7 @@ function scanTypeRanges(
       continue;
     }
     const headerTokens: Token[] = [];
-    for (let cursor = index + 2; cursor < tokens.length; cursor += 1) {
+    for (let cursor = index + 1; cursor < tokens.length; cursor += 1) {
       const token = tokens[cursor];
       if (token === undefined || token.text === ";") {
         break;
@@ -333,16 +346,16 @@ function scanTypeRanges(
         headerTokens.push(token);
         continue;
       }
-      const leading = tokens[index + 1];
-      if (leading !== undefined) {
-        headerTokens.unshift(leading);
-      }
+      // `typedef struct { ... } Name;` has an empty header: the brace is the
+      // first token after the introducer, and the type name trails the body.
       if (headerTokens.some((headerToken) => headerToken.text === "=")) {
         break;
       }
-      const name = typeTagName(headerTokens);
       const closeTokenIndex = bracePairs.get(cursor);
       const close = closeTokenIndex === undefined ? undefined : tokens[closeTokenIndex];
+      const name =
+        typeTagName(headerTokens) ??
+        trailingTypeName(tokens, closeTokenIndex === undefined ? -1 : closeTokenIndex);
       if (
         name !== undefined &&
         closeTokenIndex !== undefined &&
@@ -580,6 +593,7 @@ function parseDeclarationSegment(rawTokens: readonly Token[]): ParsedDeclaration
   const structuredOpen = tokens.findIndex((token) => token.text === "[");
   if (
     structuredOpen > 0 &&
+    ["auto", "&", "&&"].includes(tokens[structuredOpen - 1]?.text ?? "") &&
     hasTypeEvidence(tokens, structuredOpen) &&
     tokens.slice(0, structuredOpen).some((token) => token.text === "auto")
   ) {

@@ -2,7 +2,7 @@
   "name": "symbol-dependency-tree",
   "displayName": "C/C++ Symbol Reference Tree",
   "description": "Explore callers and references for C/C++ functions, variables, types, macros, and callbacks in a Source Insight-style graph.",
-  "version": "0.9.9",
+  "version": "0.10.0",
   "publisher": "ZhiqinQiu",
   "license": "MIT",
   "icon": "resources/extension-icon.png",

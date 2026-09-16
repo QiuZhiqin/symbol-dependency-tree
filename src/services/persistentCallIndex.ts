@@ -34,8 +34,10 @@ import {
   buildExtensionGlob,
   normalizeExtension
 } from "../utils/exclusions";
+import { countArgumentsAfterName } from "../utils/arityMatcher";
 import { shortSymbolName } from "../utils/symbolNames";
 import {
+  definitionOwnerMatchesTarget,
   virtualMemberKey,
   virtualMemberOwnersMatch
 } from "../utils/virtualDispatch";
@@ -81,6 +83,7 @@ export interface PersistentIndexStatus {
 
 export interface PersistentIndexQueryResult {
   readonly scopes: readonly ScopeReference[];
+  readonly targetDefinition?: vscode.Location;
 }
 
 function workspaceIdentity(): string {
@@ -398,6 +401,52 @@ export class PersistentCallIndex implements vscode.Disposable {
     return this.currentStatus;
   }
 
+  /**
+   * Resolves the defining location of a member call such as
+   * `m_sta_wlan_pool.reserve_vbss()` from another file.
+   *
+   * Walks the member-owner path (`ApManager::m_sta_wlan_pool`) through the
+   * indexed member types to find the receiver's type, then returns the
+   * unique indexed function definition for that member when one exists.
+   */
+  public async resolveMemberDefinition(
+    target: TargetSymbol,
+    token: vscode.CancellationToken
+  ): Promise<vscode.Location | undefined> {
+    await this.ensureReady(token);
+    if (token.isCancellationRequested) {
+      return undefined;
+    }
+    const memberOwner = resolveMemberOwner(
+      target.scope,
+      target.memberOwnerPath,
+      this.memberTypes,
+      this.objectTypes
+    );
+    if (memberOwner === undefined) {
+      return undefined;
+    }
+    const queryName = shortSymbolName(target.name);
+    const definitions = this.definitionsByName.get(queryName) ?? [];
+    const matching = definitions.filter(
+      (candidate) => candidate.definition.memberOwner === memberOwner
+    );
+    const definition =
+      matching.length === 1 ? matching[0] : undefined;
+    if (definition === undefined) {
+      return undefined;
+    }
+    const uri = vscode.Uri.parse(definition.file.uri);
+    const document = await vscode.workspace.openTextDocument(uri);
+    return new vscode.Location(
+      uri,
+      new vscode.Range(
+        document.positionAt(definition.definition.selectionStart),
+        document.positionAt(definition.definition.selectionEnd)
+      )
+    );
+  }
+
   public stats(): PersistentIndexStats {
     let functions = 0;
     let calls = 0;
@@ -435,27 +484,131 @@ export class PersistentCallIndex implements vscode.Disposable {
               definition.selectionStart <= targetOffset &&
               targetOffset < definition.selectionEnd
           );
+    // An implicit member owner (a bare call inside a member function) can be
+    // a free function the enclosing class never declared. Without an explicit
+    // receiver path, treat the target as member-scoped only when the owner
+    // is a real indexed type (class/struct, not a namespace) that — or one of
+    // whose ancestors — actually declares that member.
+    const ownerIsKnownType = (owner: string): boolean =>
+      (this.definitionsByName.get(owner) ?? []).some(
+        (candidate) => candidate.definition.kind === "type"
+      );
+    const scopeOwnerDeclaresMember = (owner: string): boolean => {
+      const pending = [owner];
+      const visited = new Set<string>();
+      while (pending.length > 0) {
+        const current = pending.pop()!;
+        if (visited.has(current)) {
+          continue;
+        }
+        visited.add(current);
+        if (this.memberTypes.has(memberTypeKey(current, queryName))) {
+          return true;
+        }
+        pending.push(...(this.baseTypes.get(current) ?? []));
+      }
+      return false;
+    };
+    const effectiveScope: IndexedSymbolScope | undefined =
+      target.scope?.kind === "member" &&
+      target.memberOwnerPath === undefined &&
+      ownerIsKnownType(target.scope.owner) &&
+      !scopeOwnerDeclaresMember(target.scope.owner)
+        ? undefined
+        : target.scope;
+    const targetMemberOwner =
+      effectiveScope?.kind === "member"
+        ? resolveMemberOwner(
+            effectiveScope,
+            target.memberOwnerPath,
+            this.memberTypes,
+            this.objectTypes
+          )
+        : undefined;
+    const definitionMatchesTargetOwner = (definition: IndexedFunctionDefinition): boolean =>
+      definitionOwnerMatchesTarget(
+        targetMemberOwner,
+        definition.memberOwner,
+        queryName,
+        this.baseTypes,
+        this.virtualMembers
+      );
     const sameFileDefinitions =
-      targetFile?.definitions.filter((definition) => definition.name === queryName) ?? [];
-    const globalDefinitions = this.definitionsByName.get(queryName) ?? [];
+      targetFile?.definitions.filter(
+        (definition) =>
+          definition.name === queryName && definitionMatchesTargetOwner(definition)
+      ) ?? [];
+    const globalDefinitions = (
+      this.definitionsByName.get(queryName) ?? []
+    ).filter((candidate) => definitionMatchesTargetOwner(candidate.definition));
     const targetCanBeCallable =
       callableKind(target.kind) && target.scope?.kind !== "local";
+    const disambiguateByArity = async (
+      candidates: readonly IndexedDefinitionWithFile[]
+    ): Promise<IndexedDefinitionWithFile | undefined> => {
+      if (targetDocument === undefined || targetOffset === undefined) {
+        return undefined;
+      }
+      const callArgumentCount = countArgumentsAfterName(
+        targetDocument.getText(),
+        targetOffset + queryName.length
+      );
+      if (callArgumentCount === undefined) {
+        return undefined;
+      }
+      const matches: IndexedDefinitionWithFile[] = [];
+      for (const candidate of candidates) {
+        const document = await vscode.workspace.openTextDocument(
+          vscode.Uri.parse(candidate.file.uri)
+        );
+        if (
+          countArgumentsAfterName(
+            document.getText(),
+            candidate.definition.selectionEnd
+          ) === callArgumentCount
+        ) {
+          matches.push(candidate);
+        }
+      }
+      return matches.length === 1 ? matches[0] : undefined;
+    };
     const targetDefinition: IndexedDefinitionWithFile | undefined =
       exactDefinition !== undefined
         ? { file: targetFile!, definition: exactDefinition }
-        : targetCanBeCallable && sameFileDefinitions.length === 1
-          ? { file: targetFile!, definition: sameFileDefinitions[0]! }
-          : targetCanBeCallable && globalDefinitions.length === 1
-            ? globalDefinitions[0]!
-            : undefined;
+        : !targetCanBeCallable
+          ? undefined
+          : sameFileDefinitions.length === 1
+            ? { file: targetFile!, definition: sameFileDefinitions[0]! }
+            : sameFileDefinitions.length > 1
+              ? await disambiguateByArity(
+                  sameFileDefinitions.map((definition) => ({
+                    file: targetFile!,
+                    definition
+                  }))
+                )
+              : globalDefinitions.length === 1
+                ? globalDefinitions[0]!
+                : await disambiguateByArity(globalDefinitions);
     const staticTarget = targetDefinition?.definition.isStatic === true;
     const functionTarget = targetDefinition?.definition.kind === "function";
+    let targetDefinitionLocation: vscode.Location | undefined;
+    if (targetDefinition !== undefined) {
+      const definitionUri = vscode.Uri.parse(targetDefinition.file.uri);
+      const definitionDocument = await vscode.workspace.openTextDocument(definitionUri);
+      targetDefinitionLocation = new vscode.Location(
+        definitionUri,
+        new vscode.Range(
+          definitionDocument.positionAt(targetDefinition.definition.selectionStart),
+          definitionDocument.positionAt(targetDefinition.definition.selectionEnd)
+        )
+      );
+    }
     const candidates = (this.callsByCallee.get(queryName) ?? []).filter(
       (candidate) =>
         (!functionTarget || candidate.call.kind === "callable") &&
         (!staticTarget || candidate.file.uri === targetDefinition.file.uri) &&
         callMatchesScope(
-          target.scope,
+          effectiveScope,
           target.memberOwnerPath,
           canonicalUri,
           candidate,
@@ -559,7 +712,7 @@ export class PersistentCallIndex implements vscode.Disposable {
       const nameOrder = left.name.localeCompare(right.name);
       return nameOrder !== 0 ? nameOrder : left.uri.fsPath.localeCompare(right.uri.fsPath);
     });
-    return { scopes };
+    return { scopes, targetDefinition: targetDefinitionLocation };
   }
 
   private databaseDirectoryUri(): vscode.Uri {
