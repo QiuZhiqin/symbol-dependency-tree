@@ -9,7 +9,7 @@ Explore C/C++ symbol references in a Source Insight-style graph at the bottom of
 - **Follow indirect calls** — Function pointers, callback tables, member callbacks, and common virtual-dispatch patterns are recognized.
 - **Jump directly to source** — Click a caller to open the reference, double-click a node to open its definition, or select a line number when multiple references exist.
 - **Stay synchronized while editing** — The changed file is reindexed automatically when you edit, save, or close it. A full workspace rebuild is not required for normal changes.
-- **Keep multiple investigations open** — Each query opens in its own tab so you can switch between call trees without losing context.
+- **Keep multiple investigations open** — Each query opens in its own tab so you can switch between call trees without losing context. Re-indexing a symbol that is already open focuses its existing tab instead of duplicating it.
 - **Match your VS Code theme** — Graph colors, text, borders, and backgrounds follow the active VS Code theme.
 
 ## Getting Started
@@ -51,6 +51,7 @@ You normally do not need to rebuild the entire index. Use **Rebuild C/C++ Symbol
 - Callback tables and function-pointer assignments
 - Struct or class member callbacks such as `ctx->ops->callback()`
 - Virtual calls through a base-class pointer and matching derived overrides
+- Same-name definitions in different files matched by their call-site argument counts, for example a multi-argument facade next to a platform-specific implementation
 - Structs, classes, unions, and enums used in parameters, return values, members, and local declarations
 - Variables, enum values, object-like macros, and other identifiers referenced inside function bodies
 
@@ -58,7 +59,7 @@ You normally do not need to rebuild the entire index. Use **Rebuild C/C++ Symbol
 
 | Command | Purpose |
 | --- | --- |
-| **Generate Symbol Reference Tree** | Create a new reference-tree tab from the current cursor position |
+| **Generate Symbol Reference Tree** | Open a reference tree for the symbol at the cursor, focusing the existing tab if that symbol is already open |
 | **Refresh Symbol Reference Tree** | Run the query for the current tab again |
 | **Close All Symbol Trees** | Close every open graph tab at once |
 | **Close Current Symbol Tree** | Close the active graph tab |
@@ -88,5 +89,5 @@ The index stays on your machine. The extension does not depend on CodeGraph and 
 
 - Complex macro expansion, token concatenation, and conditional compilation can hide some references.
 - Function pointers passed through several functions, advanced template instantiation, and macro-generated declarations may not be fully resolved.
-- Same-named global functions and C++ overloads can be merged in some cases. File-local `static` functions remain separate.
+- Same-named global functions and C++ overloads with identical parameter counts can be merged in some cases; definitions with different argument counts are matched by arity. File-local `static` functions remain separate.
 - The extension uses lightweight C/C++ source analysis rather than a complete Clang compilation model.
