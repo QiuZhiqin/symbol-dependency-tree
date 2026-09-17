@@ -24,6 +24,13 @@ describe("QueryCache", () => {
     expect(cache.get("references:a")).toBe(3);
   });
 
+  it("advances its generation even when clearing an empty cache", () => {
+    const cache = new QueryCache();
+
+    cache.clear();
+
+    expect(cache.currentGeneration).toBe(1);
+  });
   it("clears all cached values", () => {
     const cache = new QueryCache();
     cache.set("one", 1);

@@ -5,6 +5,10 @@
   "version": "0.10.0",
   "publisher": "ZhiqinQiu",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QiuZhiqin/symbol-dependency-tree.git"
+  },
   "icon": "resources/extension-icon.png",
   "engines": {
     "vscode": "^1.95.0"

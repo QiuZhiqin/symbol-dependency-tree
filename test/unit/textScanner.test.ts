@@ -40,6 +40,42 @@ describe("maskCppCommentsAndLiterals", () => {
     expect(findSymbolOffsets(maskCppCommentsAndLiterals(comment), "target")).toHaveLength(1);
     expect(findSymbolOffsets(maskCppCommentsAndLiterals(literal), "target")).toHaveLength(1);
   });
+
+  it("preserves UTF-16 offsets around astral characters in every masked construct", () => {
+    for (const lineEnding of ["\n", "\r\n"]) {
+      const source = [
+        "// 😀 target",
+        "/* 😀 target",
+        "   target */",
+        'const char* text = "😀 target"; target();',
+        'const char* raw = R"tag(😀 target',
+        'target)tag";',
+        "😀😀 target();"
+      ].join(lineEnding);
+      const masked = maskCppCommentsAndLiterals(source);
+      const sameLineTarget = source.indexOf("target();", source.indexOf("text"));
+      const finalTarget = source.lastIndexOf("target();");
+      const sourceNewlines = Array.from(source.matchAll(/\r|\n/gu)).map((match) => [
+        match.index,
+        match[0]
+      ]);
+      const maskedNewlines = Array.from(masked.matchAll(/\r|\n/gu)).map((match) => [
+        match.index,
+        match[0]
+      ]);
+
+      expect(masked).toHaveLength(source.length);
+      expect(maskedNewlines).toEqual(sourceNewlines);
+      expect(findSymbolOffsets(masked, "target")).toEqual([sameLineTarget, finalTarget]);
+      for (const offset of [sameLineTarget, finalTarget]) {
+        expect(source.slice(offset, offset + "target".length)).toBe("target");
+      }
+      const sameLineStart = source.lastIndexOf(lineEnding, sameLineTarget - 1) + lineEnding.length;
+      expect(sameLineTarget - sameLineStart).toBe(
+        masked.indexOf("target", sameLineStart) - sameLineStart
+      );
+    }
+  });
 });
 
 describe("findSymbolOffsets", () => {

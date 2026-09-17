@@ -1,5 +1,10 @@
 export class QueryCache {
   private readonly values = new Map<string, unknown>();
+  private generation = 0;
+
+  public get currentGeneration(): number {
+    return this.generation;
+  }
 
   public get<T>(key: string): T | undefined {
     return this.values.get(key) as T | undefined;
@@ -27,6 +32,7 @@ export class QueryCache {
   }
 
   public clear(): void {
+    this.generation += 1;
     this.values.clear();
   }
 }

@@ -868,10 +868,10 @@ export class PersistentCallIndex implements vscode.Disposable {
       totalFiles: uris.length
     });
     const seen = new Set(uris.map((uri) => uri.toString()));
+    const pendingChanges = new Map<string, IndexedFileRecord | undefined>();
     for (const key of this.files.keys()) {
       if (!seen.has(key)) {
-        this.files.delete(key);
-        this.recordDeletion(key);
+        pendingChanges.set(key, undefined);
         changed = true;
       }
     }
@@ -899,7 +899,7 @@ export class PersistentCallIndex implements vscode.Disposable {
             return;
           }
           const indexed = await this.indexFile(uri, stat);
-          this.recordUpsert(indexed);
+          pendingChanges.set(indexed.uri, indexed);
           changed = true;
         })
       );
@@ -919,6 +919,15 @@ export class PersistentCallIndex implements vscode.Disposable {
         totalFiles: uris.length
       });
       return;
+    }
+    for (const [uri, file] of pendingChanges) {
+      if (file === undefined) {
+        this.files.delete(uri);
+        this.recordDeletion(uri);
+      } else {
+        this.files.set(uri, file);
+        this.recordUpsert(file);
+      }
     }
     this.rebuildLookup();
     if (
@@ -1001,7 +1010,6 @@ export class PersistentCallIndex implements vscode.Disposable {
             }];
       })
     };
-    this.files.set(uri.toString(), indexed);
     return indexed;
   }
 
@@ -1247,6 +1255,7 @@ export class PersistentCallIndex implements vscode.Disposable {
             return;
           }
           const indexed = await this.indexFile(uri, stat);
+          this.files.set(indexed.uri, indexed);
           this.recordUpsert(indexed);
           changed = true;
         })
@@ -1333,6 +1342,7 @@ export class PersistentCallIndex implements vscode.Disposable {
         return;
       }
       const indexed = await this.indexFile(uri, stat);
+      this.files.set(indexed.uri, indexed);
       this.recordUpsert(indexed);
       this.rebuildLookup();
       await this.persistIncremental();
@@ -1363,6 +1373,7 @@ export class PersistentCallIndex implements vscode.Disposable {
         document.isDirty ? -document.version : stat.mtime,
         bytes.byteLength
       );
+      this.files.set(indexed.uri, indexed);
       this.recordUpsert(indexed);
       this.rebuildLookup();
       await this.persistIncremental();

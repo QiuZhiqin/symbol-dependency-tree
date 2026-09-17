@@ -27,7 +27,7 @@ function rawStringEnd(source: string, start: number): number | undefined {
 }
 
 export function maskCppCommentsAndLiterals(source: string): string {
-  const output = [...source];
+  const output = source.split("");
   let index = 0;
 
   while (index < source.length) {

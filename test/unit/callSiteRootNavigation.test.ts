@@ -381,4 +381,28 @@ describe("call-site root navigation binds the definition", () => {
         .positionAt(fixtures.facadeText.indexOf("int vbss_if_get_sta_entry")).line + 1;
     expect(definition.range.start.line + 1).toBe(facadeDefinitionLine);
   });
+
+  it("does not publish a partial index when rebuild is cancelled", async () => {
+    const output = { appendLine: () => undefined, error: () => undefined };
+    const index = new PersistentCallIndex(
+      vscode.Uri.parse("file:///e:/sdt-fixture") as vscode.Uri,
+      output as unknown as vscode.OutputChannel
+    );
+    let cancellationChecks = 0;
+    const cancellingToken = {
+      get isCancellationRequested(): boolean {
+        cancellationChecks += 1;
+        return cancellationChecks >= 2;
+      }
+    } as vscode.CancellationToken;
+
+    try {
+      await index.rebuild(cancellingToken);
+
+      expect(index.status().phase).toBe("cancelled");
+      expect(index.stats()).toEqual({ files: 0, functions: 0, calls: 0 });
+    } finally {
+      index.dispose();
+    }
+  });
 });

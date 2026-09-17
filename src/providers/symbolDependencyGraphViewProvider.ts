@@ -438,12 +438,40 @@ export class SymbolDependencyGraphViewProvider
     node.message = undefined;
     this.postState();
     const generation = document.session.currentGeneration;
+    const token = document.session.token;
+    const target = node.target;
+    const owns = (): boolean =>
+      this.documents.get(document.id) === document &&
+      document.nodes.get(nodeId) === node &&
+      document.session.isCurrent(generation);
     try {
-      const result = await this.references.resolve(node.target, document.session.token);
-      if (!document.session.isCurrent(generation)) {
+      const result = await this.references.resolve(target, token);
+      if (!owns()) {
         return;
       }
 
+      const stagedChildren: Array<{
+        readonly scope: ScopeReference;
+        readonly ancestorIds: ReadonlySet<string>;
+        readonly cycle: boolean;
+        readonly references: GraphReference[];
+      }> = [];
+      for (const scope of result.scopes) {
+        const path = extendAncestorPath(node.ancestorIds, scope.id);
+        const references = await this.referencePayloads(scope, owns);
+        if (!owns()) {
+          return;
+        }
+        stagedChildren.push({
+          scope,
+          ancestorIds: path.ancestorIds,
+          cycle: path.cycle,
+          references
+        });
+      }
+      if (!owns()) {
+        return;
+      }
       if (
         node.root &&
         node.target !== undefined &&
@@ -454,21 +482,20 @@ export class SymbolDependencyGraphViewProvider
       }
 
       this.removeDescendants(document, node);
-      for (const scope of result.scopes) {
-        const path = extendAncestorPath(node.ancestorIds, scope.id);
+      for (const staged of stagedChildren) {
         const childId = this.nextNodeId(document, "node");
         const child: InternalGraphNode = {
           id: childId,
           parentId: node.id,
-          label: graphNodeLabel(scope),
+          label: graphNodeLabel(staged.scope),
           root: false,
-          cycle: path.cycle,
-          ancestorIds: path.ancestorIds,
-          scope,
-          target: scope.target,
-          references: await this.referencePayloads(scope),
+          cycle: staged.cycle,
+          ancestorIds: staged.ancestorIds,
+          scope: staged.scope,
+          target: staged.scope.target,
+          references: staged.references,
           childIds: [],
-          expandable: scope.target !== undefined && !path.cycle,
+          expandable: staged.scope.target !== undefined && !staged.cycle,
           expanded: false,
           loading: false,
           loaded: false
@@ -476,26 +503,36 @@ export class SymbolDependencyGraphViewProvider
         document.nodes.set(childId, child);
         node.childIds.push(childId);
       }
-
       node.loaded = true;
       if (result.scopes.length === 0) {
         node.message = "No indexed references found in the symbol database";
       }
     } catch (error) {
+      if (!owns()) {
+        return;
+      }
       node.loaded = true;
       node.message = `Unable to load branch: ${String(error)}`;
       this.output.appendLine(`Graph expansion failed for ${node.label}: ${String(error)}`);
     } finally {
-      node.loading = false;
-      this.postState();
+      if (owns()) {
+        node.loading = false;
+        this.postState();
+      }
     }
   }
 
-  private async referencePayloads(scope: ScopeReference): Promise<GraphReference[]> {
-    return Promise.all(scope.references.map((hit) => this.referencePayload(hit)));
+  private async referencePayloads(
+    scope: ScopeReference,
+    owns: () => boolean
+  ): Promise<GraphReference[]> {
+    return Promise.all(scope.references.map((hit) => this.referencePayload(hit, owns)));
   }
 
-  private async referencePayload(hit: ReferenceHit): Promise<GraphReference> {
+  private async referencePayload(
+    hit: ReferenceHit,
+    owns: () => boolean
+  ): Promise<GraphReference> {
     let preview = "File is unavailable";
     let range = hit.range;
     try {
@@ -511,7 +548,9 @@ export class SymbolDependencyGraphViewProvider
         document.positionAt(expanded.end)
       );
     } catch (error) {
-      this.output.appendLine(`Unable to read ${hit.uri.toString()}: ${String(error)}`);
+      if (owns()) {
+        this.output.appendLine(`Unable to read ${hit.uri.toString()}: ${String(error)}`);
+      }
     }
     return {
       uri: hit.uri.toString(),

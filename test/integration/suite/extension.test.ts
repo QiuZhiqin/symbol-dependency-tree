@@ -66,6 +66,27 @@ interface SourceCase {
   }>;
 }
 
+interface TextScannerModule {
+  readonly maskCppCommentsAndLiterals: (source: string) => string;
+  readonly findSymbolOffsets: (source: string, symbol: string, limit?: number) => number[];
+}
+
+interface CallIndexScannerModule {
+  readonly scanCallIndexFile: (source: string) => {
+    readonly definitions: readonly {
+      readonly name: string;
+      readonly selectionStart: number;
+      readonly selectionEnd: number;
+    }[];
+    readonly calls: readonly {
+      readonly callee: string;
+      readonly offset: number;
+      readonly callerName: string;
+      readonly callerSelectionStart: number;
+    }[];
+  };
+}
+
 async function exists(uri: vscode.Uri): Promise<boolean> {
   try {
     await vscode.workspace.fs.stat(uri);
@@ -226,6 +247,52 @@ suite("Symbol Dependency Tree integration", () => {
       "idle",
       "Workspace activation should start loading the persistent index"
     );
+  });
+
+  test("preserves UTF-16 scanner offsets and VS Code positions after astral characters", async () => {
+    const { extension } = await activate();
+    const source = [
+      "// 😀 target",
+      "void target() {}",
+      'void caller() { const char* s = "😀"; target(); }'
+    ].join("\r\n");
+    const document = await vscode.workspace.openTextDocument({ language: "cpp", content: source });
+    const scannerDirectory = vscode.Uri.joinPath(extension.extensionUri, "out", "utils");
+    const textScanner = (await import(
+      vscode.Uri.joinPath(scannerDirectory, "textScanner.js").fsPath
+    )) as TextScannerModule;
+    const callIndexScanner = (await import(
+      vscode.Uri.joinPath(scannerDirectory, "callIndexScanner.js").fsPath
+    )) as CallIndexScannerModule;
+    const masked = textScanner.maskCppCommentsAndLiterals(source);
+    const targetOffsets = textScanner.findSymbolOffsets(masked, "target");
+    const indexed = callIndexScanner.scanCallIndexFile(source);
+    const targetDefinition = indexed.definitions.find((definition) => definition.name === "target");
+    const targetCall = indexed.calls.find((call) => call.callee === "target" && call.offset === 70);
+
+    assert.equal(masked.length, source.length);
+    assert.deepEqual(
+      Array.from(masked.matchAll(/\r|\n/gu)).map((match) => [match.index, match[0]]),
+      Array.from(source.matchAll(/\r|\n/gu)).map((match) => [match.index, match[0]])
+    );
+    assert.deepEqual(targetOffsets, [19, 70]);
+    assert.ok(targetDefinition, "Missing target definition");
+    assert.equal(targetDefinition.selectionStart, 19);
+    assert.equal(targetDefinition.selectionEnd, 25);
+    assert.deepEqual(document.positionAt(targetDefinition.selectionStart), new vscode.Position(1, 5));
+    assert.ok(targetCall, "Missing target call");
+    assert.equal(targetCall.callerName, "caller");
+    assert.equal(targetCall.callerSelectionStart, 37);
+    assert.deepEqual(document.positionAt(targetCall.callerSelectionStart), new vscode.Position(2, 5));
+    assert.deepEqual(document.positionAt(targetCall.offset), new vscode.Position(2, 38));
+    for (const offset of [targetDefinition.selectionStart, targetCall.offset]) {
+      const position = document.positionAt(offset);
+      assert.equal(document.offsetAt(position), offset);
+      assert.equal(
+        document.getText(new vscode.Range(position, document.positionAt(offset + "target".length))),
+        "target"
+      );
+    }
   });
 
   test("right-click command resolves callers exclusively from the rebuilt database", async () => {

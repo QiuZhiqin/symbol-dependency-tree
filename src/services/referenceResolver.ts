@@ -22,11 +22,15 @@ export class ReferenceResolver {
       return cached;
     }
 
+    const generation = this.cache.currentGeneration;
     const indexed = await this.persistentIndex.query(target, token);
     const result: ReferenceQueryResult = {
       scopes: indexed.scopes,
       definition: indexed.targetDefinition
     };
-    return this.cache.set(cacheKey, result);
+    if (this.cache.currentGeneration === generation && !token.isCancellationRequested) {
+      this.cache.set(cacheKey, result);
+    }
+    return result;
   }
 }
