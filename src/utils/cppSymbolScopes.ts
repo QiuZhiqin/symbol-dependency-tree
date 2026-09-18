@@ -336,6 +336,12 @@ function scanTypeRanges(
     ) {
       continue;
     }
+    if (
+      (keyword.text === "class" || keyword.text === "struct") &&
+      tokens[index - 1]?.text === "enum"
+    ) {
+      continue;
+    }
     const headerTokens: Token[] = [];
     for (let cursor = index + 1; cursor < tokens.length; cursor += 1) {
       const token = tokens[cursor];
@@ -363,7 +369,7 @@ function scanTypeRanges(
       ) {
         ranges.push({
           name: name.text,
-          baseTypes: baseTypeNames(headerTokens),
+          baseTypes: keyword.text === "enum" ? [] : baseTypeNames(headerTokens),
           typeKind: keyword.text as IndexedTypeDefinition["typeKind"],
           rangeStart: keyword.start,
           rangeEnd:
@@ -780,6 +786,57 @@ function directTypeTokens(
     }
   }
   return statements;
+}
+
+function directEnumDeclarations(
+  tokens: readonly Token[],
+  range: TypeRange
+): ParsedDeclaration[] {
+  const declarations: ParsedDeclaration[] = [];
+  let segmentStart = range.openTokenIndex + 1;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  for (
+    let index = segmentStart;
+    index <= range.closeTokenIndex;
+    index += 1
+  ) {
+    const token = tokens[index];
+    const atEnd = index === range.closeTokenIndex;
+    const atSeparator =
+      token?.text === "," &&
+      parenDepth === 0 &&
+      bracketDepth === 0 &&
+      braceDepth === 0;
+    if (atEnd || atSeparator) {
+      const name = tokens
+        .slice(segmentStart, index)
+        .find(isIdentifier);
+      if (name !== undefined) {
+        declarations.push({
+          name: name.text,
+          offset: name.start,
+          typeName: range.name
+        });
+      }
+      segmentStart = index + 1;
+    }
+    if (token?.text === "(") {
+      parenDepth += 1;
+    } else if (token?.text === ")") {
+      parenDepth = Math.max(0, parenDepth - 1);
+    } else if (token?.text === "[") {
+      bracketDepth += 1;
+    } else if (token?.text === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+    } else if (token?.text === "{") {
+      braceDepth += 1;
+    } else if (token?.text === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+    }
+  }
+  return declarations;
 }
 
 function scanGlobalInitializers(
@@ -1215,6 +1272,17 @@ export function scanCppSymbolScopes(
   const declarations: IndexedSymbolDeclaration[] = [];
   const virtualMembers: IndexedVirtualMember[] = [];
   for (const range of typeRanges) {
+    if (range.typeKind === "enum") {
+      for (const declaration of directEnumDeclarations(tokens, range)) {
+        declarations.push({
+          name: declaration.name,
+          offset: declaration.offset,
+          scope: { kind: "member", owner: range.name },
+          typeName: declaration.typeName
+        });
+      }
+      continue;
+    }
     for (const statement of directTypeTokens(tokens, range)) {
       const parsedDeclarations = parseDeclarationSegment(statement);
       for (const declaration of parsedDeclarations) {

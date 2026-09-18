@@ -116,6 +116,57 @@ describe("persistent call-index scanner", () => {
     ]);
   });
 
+  it("binds scoped enum members to their single enum owner", () => {
+    const source = `
+namespace ieee1905_1 {
+enum class eMessageType : unsigned short {
+  VIRTUAL_BSS_MOVE_PREPARATION_REQUEST_MESSAGE = 0x8040,
+  VIRTUAL_BSS_MOVE_PREPARATION_RESPONSE_MESSAGE = 0x8041,
+};
+}
+
+void send_message()
+{
+  consume(ieee1905_1::eMessageType::VIRTUAL_BSS_MOVE_PREPARATION_REQUEST_MESSAGE);
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const enumTypes = indexed.definitions.filter(
+      (definition) => definition.name === "eMessageType"
+    );
+    const declaration = indexed.declarations.find(
+      (candidate) =>
+        candidate.name === "VIRTUAL_BSS_MOVE_PREPARATION_REQUEST_MESSAGE"
+    );
+    const references = indexed.calls.filter(
+      (call) =>
+        call.callee === "VIRTUAL_BSS_MOVE_PREPARATION_REQUEST_MESSAGE"
+    );
+
+    expect(enumTypes).toHaveLength(1);
+    expect(enumTypes[0]).toMatchObject({
+      kind: "type",
+      typeKind: "enum"
+    });
+    expect(declaration).toEqual({
+      name: "VIRTUAL_BSS_MOVE_PREPARATION_REQUEST_MESSAGE",
+      offset: source.indexOf("VIRTUAL_BSS_MOVE_PREPARATION_REQUEST_MESSAGE"),
+      scope: { kind: "member", owner: "eMessageType" },
+      typeName: "eMessageType"
+    });
+    expect(references).toHaveLength(1);
+    expect(references[0]).toMatchObject({
+      callerName: "send_message",
+      scope: { kind: "member", owner: "eMessageType" }
+    });
+    expect(
+      source.slice(
+        references[0]!.offset,
+        references[0]!.offset + references[0]!.callee.length
+      )
+    ).toBe("VIRTUAL_BSS_MOVE_PREPARATION_REQUEST_MESSAGE");
+  });
+
   it("does not treat macro comparisons in conditions as local declarations", () => {
     const source = `
 #define VS_SUB_TYPE_TOPO_DETECTION 0
