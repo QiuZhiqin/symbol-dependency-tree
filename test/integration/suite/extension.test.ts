@@ -1,6 +1,4 @@
 import * as assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { gunzipSync } from "node:zlib";
 import { suite, test } from "mocha";
 import * as vscode from "vscode";
 
@@ -94,14 +92,6 @@ async function exists(uri: vscode.Uri): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function compactSnapshotName(firstWorkspaceFolder: vscode.WorkspaceFolder): string {
-  const digest = createHash("sha256")
-    .update(firstWorkspaceFolder.uri.toString())
-    .digest("hex")
-    .slice(0, 20);
-  return `call-index-${digest}.json.gz`;
 }
 
 async function waitForIndex(
@@ -311,49 +301,16 @@ suite("Symbol Dependency Tree integration", () => {
     assert.ok(indexStatus.stats.files > 0);
     assert.ok(indexStatus.stats.functions > 0);
     assert.ok(indexStatus.stats.calls > 0);
-    const firstWorkspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    assert.ok(firstWorkspaceFolder, "The index requires a workspace folder");
-    const indexDirectory = vscode.Uri.joinPath(
-      firstWorkspaceFolder.uri,
-      ".symbol-dependency-tree"
-    );
-    const indexEntries = await vscode.workspace.fs.readDirectory(indexDirectory);
-    const snapshotName = compactSnapshotName(firstWorkspaceFolder);
-    const compressedIndex = indexEntries.find(
-      ([name, type]) =>
-        type === vscode.FileType.File && name === snapshotName
-    );
-    assert.ok(
-      compressedIndex,
-      `No compressed workspace-local index database was written to ${indexDirectory.toString()}`
-    );
-    const compressedBytes = await vscode.workspace.fs.readFile(
-      vscode.Uri.joinPath(indexDirectory, compressedIndex[0])
-    );
-    assert.deepEqual(
-      [...compressedBytes.slice(0, 2)],
-      [0x1f, 0x8b],
-      "Persistent index does not have a gzip header"
-    );
-    const compactDocument = JSON.parse(
-      gunzipSync(compressedBytes).toString("utf8")
-    ) as Record<string, unknown>;
-    assert.equal(compactDocument.v, 19);
-    assert.ok(Array.isArray(compactDocument.s), "Compact index has no string table");
-    assert.ok(Array.isArray(compactDocument.f), "Compact index has no file tuples");
-    assert.equal("files" in compactDocument, false, "Keyed v10 records were persisted");
-    assert.equal(
-      indexEntries.some(([name]) =>
-        /^call-index-[a-f0-9]{20}\.json$/u.test(name)
-      ),
-      false,
-      "Legacy uncompressed index was not removed"
-    );
-    for (const additionalFolder of vscode.workspace.workspaceFolders?.slice(1) ?? []) {
+    // The SQLite index lives in VS Code's workspace storage, never in the source tree.
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const legacyDirectory = vscode.Uri.joinPath(folder.uri, ".symbol-dependency-tree");
+      const legacyEntries = (await exists(legacyDirectory))
+        ? await vscode.workspace.fs.readDirectory(legacyDirectory)
+        : [];
       assert.equal(
-        await exists(vscode.Uri.joinPath(additionalFolder.uri, ".symbol-dependency-tree")),
+        legacyEntries.some(([name]) => /^call-index-.*\.(?:sqlite|json(?:\.gz)?)$/u.test(name)),
         false,
-        `Index database was incorrectly written to ${additionalFolder.uri.toString()}`
+        `An index file was written to ${legacyDirectory.toString()}`
       );
     }
     await vscode.commands.executeCommand("symbolDependencyTree.show");
@@ -875,7 +832,7 @@ suite("Symbol Dependency Tree integration", () => {
     }
   });
 
-  test("updates added and removed workspace roots through the delta journal", async () => {
+  test("updates the index when workspace roots are removed and added back", async () => {
     const { api } = await activate();
     const folders = vscode.workspace.workspaceFolders;
     if (folders === undefined || folders.length < 2) {
@@ -892,17 +849,6 @@ suite("Symbol Dependency Tree integration", () => {
 
     await vscode.commands.executeCommand("symbolDependencyTree.rebuildIndex");
     const initialStats = api.getIndexStatus().stats;
-    const indexDirectory = vscode.Uri.joinPath(
-      primary.uri,
-      ".symbol-dependency-tree"
-    );
-    const snapshotName = compactSnapshotName(primary);
-    const snapshotUri = vscode.Uri.joinPath(indexDirectory, snapshotName);
-    const journalUri = vscode.Uri.joinPath(
-      indexDirectory,
-      snapshotName.replace(/\.json\.gz$/u, ".delta.json.gz")
-    );
-    const snapshotBefore = await vscode.workspace.fs.readFile(snapshotUri);
     let secondaryRemoved = false;
 
     try {
@@ -916,7 +862,6 @@ suite("Symbol Dependency Tree integration", () => {
       );
       assert.equal(removedStatus.phase, "ready");
       assert.ok(removedStatus.stats.files < initialStats.files);
-      assert.equal(await exists(journalUri), true, "Root removal wrote no delta journal");
 
       assert.equal(
         vscode.workspace.updateWorkspaceFolders(1, 0, {
@@ -948,18 +893,5 @@ suite("Symbol Dependency Tree integration", () => {
       }
     }
 
-    const snapshotAfter = await vscode.workspace.fs.readFile(snapshotUri);
-    assert.equal(
-      Buffer.compare(Buffer.from(snapshotBefore), Buffer.from(snapshotAfter)),
-      0,
-      "A workspace-root delta rewrote the full compact snapshot"
-    );
-    const journalBytes = await vscode.workspace.fs.readFile(journalUri);
-    const journalDocument = JSON.parse(
-      gunzipSync(journalBytes).toString("utf8")
-    ) as Record<string, unknown>;
-    assert.equal(journalDocument.v, 19);
-    assert.ok(Array.isArray(journalDocument.f));
-    assert.ok(Array.isArray(journalDocument.r));
   });
 });

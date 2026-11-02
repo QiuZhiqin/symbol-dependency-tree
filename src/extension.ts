@@ -81,7 +81,11 @@ async function openReference(argument: OpenReferenceArgument): Promise<void> {
 export function activate(context: vscode.ExtensionContext): SymbolDependencyTreeApi {
   const output = vscode.window.createOutputChannel("Symbol Dependency Tree", { log: true });
   const cache = new QueryCache();
-  const persistentIndex = new PersistentCallIndex(context.globalStorageUri, output);
+  const persistentIndex = new PersistentCallIndex(
+    context.storageUri ?? context.globalStorageUri,
+    output,
+    context.globalStorageUri
+  );
   const indexStatusBar = new PersistentIndexStatusBar(persistentIndex.status());
   const symbolResolver = new SymbolResolver((target, token) =>
     persistentIndex.resolveMemberDefinition(target, token)
@@ -188,8 +192,6 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
           return persistentIndex.rebuild(token);
         }
       );
-      cache.clear();
-      await graphProvider.invalidateAll();
       if (persistentIndex.status().phase === "cancelled") {
         void vscode.window.showInformationMessage("Symbol index rebuild cancelled.");
         return;
@@ -212,8 +214,9 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
   const startupIndexSource = new vscode.CancellationTokenSource();
 
   const documentChanges = vscode.workspace.onDidChangeTextDocument((event) => {
-    cache.clear();
-    persistentIndex.scheduleDocumentUpdate(event.document);
+    if (persistentIndex.scheduleDocumentUpdate(event.document)) {
+      cache.clear();
+    }
   });
 
   const savedDocuments = vscode.workspace.onDidSaveTextDocument((document) => {

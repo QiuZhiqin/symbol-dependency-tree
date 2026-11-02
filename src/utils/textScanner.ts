@@ -1,11 +1,7 @@
-function maskCharacter(character: string): string {
-  return character === "\n" || character === "\r" ? character : " ";
-}
-
-function maskSpan(characters: string[], source: string, start: number, end: number): void {
-  for (let index = start; index < end; index += 1) {
-    characters[index] = maskCharacter(source[index] ?? "");
-  }
+/** Replaces every UTF-16 code unit except line breaks with a space, so offsets stay aligned. */
+export function blankPreservingLineBreaks(text: string): string {
+  // No `u` flag: a surrogate pair must become two spaces, not one.
+  return text.replace(/[^\r\n]/g, " ");
 }
 
 function rawStringEnd(source: string, start: number): number | undefined {
@@ -27,58 +23,71 @@ function rawStringEnd(source: string, start: number): number | undefined {
 }
 
 export function maskCppCommentsAndLiterals(source: string): string {
-  const output = source.split("");
+  const parts: string[] = [];
+  let copied = 0;
+  const mask = (start: number, end: number): void => {
+    parts.push(source.slice(copied, start), blankPreservingLineBreaks(source.slice(start, end)));
+    copied = end;
+  };
+  // Jump between the only positions that can open a comment or literal.
+  const special = /R"|\/[/*]|["']/gu;
   let index = 0;
 
   while (index < source.length) {
-    const rawEnd = rawStringEnd(source, index);
-    if (rawEnd !== undefined) {
-      maskSpan(output, source, index, rawEnd);
-      index = rawEnd;
+    special.lastIndex = index;
+    const match = special.exec(source);
+    if (match === null) {
+      break;
+    }
+    index = match.index;
+    const current = source[index];
+
+    if (current === "R") {
+      const rawEnd = rawStringEnd(source, index);
+      if (rawEnd === undefined) {
+        index += 1;
+      } else {
+        mask(index, rawEnd);
+        index = rawEnd;
+      }
       continue;
     }
 
-    const current = source[index];
-    const next = source[index + 1];
-
-    if (current === "/" && next === "/") {
+    if (current === "/" && source[index + 1] === "/") {
       const end = source.indexOf("\n", index + 2);
       const stop = end < 0 ? source.length : end;
-      maskSpan(output, source, index, stop);
+      mask(index, stop);
       index = stop;
       continue;
     }
 
-    if (current === "/" && next === "*") {
+    if (current === "/") {
       const end = source.indexOf("*/", index + 2);
       const stop = end < 0 ? source.length : end + 2;
-      maskSpan(output, source, index, stop);
+      mask(index, stop);
       index = stop;
       continue;
     }
 
-    if (current === "\"" || current === "'") {
-      const quote = current;
-      let end = index + 1;
-      while (end < source.length) {
-        if (source[end] === "\\") {
-          end += 2;
-          continue;
-        }
-        end += 1;
-        if (source[end - 1] === quote) {
-          break;
-        }
+    const quote = current;
+    let end = index + 1;
+    while (end < source.length) {
+      if (source[end] === "\\") {
+        end += 2;
+        continue;
       }
-      maskSpan(output, source, index, Math.min(end, source.length));
-      index = Math.min(end, source.length);
-      continue;
+      end += 1;
+      if (source[end - 1] === quote) {
+        break;
+      }
     }
-
-    index += 1;
+    const stop = Math.min(end, source.length);
+    mask(index, stop);
+    index = stop;
   }
 
-  return output.join("");
+  parts.push(source.slice(copied));
+  return parts.join("");
 }
 
 function isIdentifierCharacter(character: string | undefined): boolean {

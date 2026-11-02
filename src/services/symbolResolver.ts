@@ -131,9 +131,12 @@ export class SymbolResolver {
       scope?.kind === "local"
         ? scope.declarationOffset
         : declaration?.offset;
+    // Macros keep their own lookup below, as before they were indexed.
     const sameFileDefinitions =
       definitionOffset === undefined && scope === undefined
-        ? scanned.definitions.filter((definition) => definition.name === name)
+        ? scanned.definitions.filter(
+            (definition) => definition.name === name && definition.kind !== "macro"
+          )
         : [];
     const fallbackDefinition =
       sameFileDefinitions.length === 1 ? sameFileDefinitions[0] : undefined;

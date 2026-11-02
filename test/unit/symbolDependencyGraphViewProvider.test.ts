@@ -47,6 +47,7 @@ import type {
 import { SymbolDependencyGraphViewProvider } from "../../src/providers/symbolDependencyGraphViewProvider";
 import { QueryCache } from "../../src/services/queryCache";
 import type { ReferenceResolver } from "../../src/services/referenceResolver";
+import * as textScanner from "../../src/utils/textScanner";
 
 interface Deferred<Value> {
   readonly promise: Promise<Value>;
@@ -116,6 +117,134 @@ function webviewView(postMessage: ReturnType<typeof vi.fn>): vscode.WebviewView 
 }
 
 describe("SymbolDependencyGraphViewProvider async ownership", () => {
+  it("refreshes inactive trees only when they become active", async () => {
+    const resolve = vi.fn().mockResolvedValue({ scopes: [] });
+    const provider = new SymbolDependencyGraphViewProvider(
+      vscode.Uri.file("/extension"),
+      { resolve } as unknown as ReferenceResolver,
+      new QueryCache(),
+      { appendLine: vi.fn() } as unknown as vscode.OutputChannel
+    );
+    try {
+      await provider.addRoot(rootTarget(), rootOrigin());
+      await provider.addRoot({ ...rootTarget(), id: "second", name: "second" }, rootOrigin());
+      expect(resolve).toHaveBeenCalledTimes(2);
+      await provider.invalidateAll();
+      expect(resolve).toHaveBeenCalledTimes(3);
+      await provider.addRoot(rootTarget(), rootOrigin());
+      expect(resolve).toHaveBeenCalledTimes(4);
+    } finally { provider.dispose(); }
+  });
+
+  it("reads and masks each source once per expansion across caller groups", async () => {
+    const mask = vi.spyOn(textScanner, "maskCppCommentsAndLiterals");
+    const getText = vi.fn(() => "call();\n");
+    const sharedDocument = {
+      getText,
+      lineAt: () => ({ text: "call();" }),
+      offsetAt: (position: vscode.Position): number => position.character,
+      positionAt: (offset: number): vscode.Position => new vscode.Position(0, offset)
+    } as unknown as vscode.TextDocument;
+    const shared = scope("shared");
+    const callers = ["first", "second"].map((name) => ({
+      ...scope(name),
+      references: [shared.references[0]!, shared.references[0]!]
+    }));
+    const open = vi.mocked(vscode.workspace.openTextDocument);
+    open.mockReset();
+    open.mockResolvedValue(sharedDocument);
+    const provider = new SymbolDependencyGraphViewProvider(
+      vscode.Uri.file("/extension"),
+      { resolve: vi.fn().mockResolvedValue({ scopes: callers }) } as unknown as ReferenceResolver,
+      new QueryCache(),
+      { appendLine: vi.fn() } as unknown as vscode.OutputChannel
+    );
+    try {
+      await provider.addRoot(rootTarget(), rootOrigin());
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(getText).toHaveBeenCalledTimes(1);
+      expect(mask).toHaveBeenCalledTimes(1);
+      const references = provider.snapshot().nodes.flatMap((node) => node.references);
+      expect(references).toHaveLength(4);
+      expect(references.every((reference) => reference.preview === "call();")).toBe(true);
+
+      await provider.invalidate();
+      expect(getText).toHaveBeenCalledTimes(2);
+      expect(mask).toHaveBeenCalledTimes(2);
+    } finally {
+      provider.dispose();
+      mask.mockRestore();
+    }
+  });
+
+  it("refreshes shared source once when its version changes during expansion", async () => {
+    const mask = vi.spyOn(textScanner, "maskCppCommentsAndLiterals");
+    let source = "call(\n  1\n);\n";
+    const getText = vi.fn(() => source);
+    const sharedDocument = {
+      version: 1,
+      getText,
+      lineAt: (line: number): { text: string } => ({ text: source.split("\n")[line]! }),
+      offsetAt: (position: vscode.Position): number =>
+        source.split("\n").slice(0, position.line).reduce((offset, line) => offset + line.length + 1, 0) +
+        position.character,
+      positionAt: (offset: number): vscode.Position => {
+        const lines = source.slice(0, offset).split("\n");
+        return new vscode.Position(lines.length - 1, lines.at(-1)!.length);
+      }
+    };
+    const shared = scope("shared");
+    const blocked = deferred<vscode.TextDocument>();
+    const blockedEntered = deferred<void>();
+    const open = vi.mocked(vscode.workspace.openTextDocument);
+    open.mockReset();
+    open.mockImplementation((uri) => {
+      if (uri.toString() === shared.uri.toString()) {
+        return Promise.resolve(sharedDocument as unknown as vscode.TextDocument);
+      }
+      blockedEntered.resolve();
+      return blocked.promise;
+    });
+    const callers = [
+      { ...scope("before"), references: shared.references },
+      scope("blocked"),
+      { ...scope("after"), references: [shared.references[0]!, shared.references[0]!] }
+    ];
+    const provider = new SymbolDependencyGraphViewProvider(
+      vscode.Uri.file("/extension"),
+      { resolve: vi.fn().mockResolvedValue({ scopes: callers }) } as unknown as ReferenceResolver,
+      new QueryCache(),
+      { appendLine: vi.fn() } as unknown as vscode.OutputChannel
+    );
+    try {
+      const expansion = provider.addRoot(rootTarget(), rootOrigin());
+      await blockedEntered.promise;
+      source = "call(\n  1,\n  2\n);\n";
+      sharedDocument.version += 1;
+      blocked.resolve({
+        version: 1,
+        getText: () => "",
+        lineAt: () => ({ text: "" }),
+        offsetAt: () => 0,
+        positionAt: () => new vscode.Position(0, 0)
+      } as unknown as vscode.TextDocument);
+      await expansion;
+
+      const references = provider.snapshot().nodes.find((node) => node.label === "after")!.references;
+      expect(references).toHaveLength(2);
+      expect(references.map((reference) => reference.range.end)).toEqual([
+        { line: 3, character: 2 },
+        { line: 3, character: 2 }
+      ]);
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(getText).toHaveBeenCalledTimes(2);
+      expect(mask).toHaveBeenCalledTimes(3);
+    } finally {
+      provider.dispose();
+      mask.mockRestore();
+    }
+  });
+
   it("keeps a renewed generation loading when the stale query settles", async () => {
     const resolve = vi.fn().mockResolvedValueOnce({ scopes: [] });
     const provider = new SymbolDependencyGraphViewProvider(

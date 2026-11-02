@@ -44,12 +44,13 @@ function callEnd(masked: string, selectionEnd: number): number | undefined {
 export function expandReferenceSelection(
   source: string,
   selectionStart: number,
-  selectionEnd: number
+  selectionEnd: number,
+  masked = maskCppCommentsAndLiterals(source)
 ): OffsetSelection {
   const start = Math.max(0, Math.min(selectionStart, source.length));
   const end = Math.max(start, Math.min(selectionEnd, source.length));
   const physicalLineEnd = lineEnd(source, end);
-  const expandedCallEnd = callEnd(maskCppCommentsAndLiterals(source), end);
+  const expandedCallEnd = callEnd(masked, end);
   return {
     start: lineStart(source, start),
     end: Math.max(physicalLineEnd, expandedCallEnd ?? physicalLineEnd)

@@ -2,7 +2,7 @@
   "name": "symbol-dependency-tree",
   "displayName": "C/C++ Symbol Reference Tree",
   "description": "Explore callers and references for C/C++ functions, variables, types, macros, and callbacks in a Source Insight-style graph.",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "publisher": "ZhiqinQiu",
   "license": "MIT",
   "repository": {
@@ -11,7 +11,7 @@
   },
   "icon": "resources/extension-icon.png",
   "engines": {
-    "vscode": "^1.95.0"
+    "vscode": "^1.101.0"
   },
   "categories": [
     "Other",
@@ -128,6 +128,12 @@
             ".ipp"
           ],
           "description": "Source-file extensions included in the symbol index. Rebuild the index after changing this setting."
+        },
+        "symbolDependencyTree.persistentIndex.maxFileSizeMB": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "description": "Files larger than this many megabytes (measured in UTF-8 bytes) are left out of the symbol index, such as generated register headers and data tables. Set to 0 to index every file. Rebuild the index after changing this setting."
         }
       }
     }

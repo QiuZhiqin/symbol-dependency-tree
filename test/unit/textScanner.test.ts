@@ -78,6 +78,17 @@ describe("maskCppCommentsAndLiterals", () => {
   });
 });
 
+describe("maskCppCommentsAndLiterals exact output", () => {
+  it("blanks every literal form while keeping UTF-16 offsets and CRLF line breaks", () => {
+    const source =
+      "a /* \u{1F600} */ b\r\n// c\r\nR\"x(q)x\" u8R\"(z)\" R\"bad delim(p)\" 'c' \"s\\\"t\"\n";
+
+    expect(maskCppCommentsAndLiterals(source)).toBe(
+      "a          b\r\n    \r\n         u8       R                         \n"
+    );
+  });
+});
+
 describe("findSymbolOffsets", () => {
   it("uses C/C++ identifier boundaries", () => {
     const source = "target target_ _target ns::target target2 target";

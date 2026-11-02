@@ -15,8 +15,9 @@ import {
 import { maskCppCommentsAndLiterals } from "./textScanner";
 
 export interface IndexedFunctionDefinition extends CppFunctionDefinition {
-  readonly kind: "function" | "initializer" | "type";
+  readonly kind: "function" | "initializer" | "type" | "macro";
   readonly isStatic: boolean;
+  readonly scope?: IndexedSymbolScope;
   readonly memberOwner?: string;
   readonly typeKind?: "class" | "enum" | "struct" | "union";
 }
@@ -205,15 +206,115 @@ function hasCallParenthesisAfter(
 }
 
 function qualifiedPrefixStart(source: string, offset: number): number {
-  const prefix = source.slice(Math.max(0, offset - 192), offset);
+  // A non-empty qualifier always ends with "::"; skip the regex otherwise.
+  const windowStart = Math.max(0, offset - 192);
+  let cursor = offset - 1;
+  while (cursor >= windowStart && /\s/u.test(source[cursor]!)) {
+    cursor -= 1;
+  }
+  if (cursor < windowStart || source[cursor] !== ":") {
+    return offset;
+  }
+  const prefix = source.slice(windowStart, offset);
   const qualified = /(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*$/u.exec(prefix)?.[0] ?? "";
   return offset - qualified.length;
 }
 
+/**
+ * Whether the identifier at `localOffset` of `body` is used as a callable:
+ * called, address taken, or registered as a callback.
+ */
+function isCallableReference(
+  body: string,
+  localOffset: number,
+  callee: string,
+  callerKind: IndexedFunctionDefinition["kind"]
+): boolean {
+  const qualifiedStart = qualifiedPrefixStart(body, localOffset);
+  const previous = neighboringCharacter(body, qualifiedStart - 1, -1);
+  const next = neighboringCharacter(body, localOffset + callee.length, 1);
+  const directCall = hasCallParenthesisAfter(body, localOffset + callee.length);
+  const addressTaken = previous === "&";
+  const assignedFunction = previous === "=" &&
+    (next === "," || next === ";" || (callerKind === "initializer" && next === "}"));
+  const positionalInitializerFunction =
+    callerKind === "initializer" &&
+    (previous === "{" || previous === ",") &&
+    (next === "," || next === "}");
+  const immediateArgumentOwner =
+    previous === "("
+      ? /([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*$/u.exec(
+          body.slice(Math.max(0, qualifiedStart - 96), qualifiedStart)
+        )?.[1]
+      : undefined;
+  const bareFunctionArgument =
+    (next === "," || next === ")") &&
+    (previous === "," ||
+      (previous === "(" &&
+        immediateArgumentOwner !== undefined &&
+        !nonCallNames.has(immediateArgumentOwner)));
+  return (
+    directCall ||
+    addressTaken ||
+    assignedFunction ||
+    positionalInitializerFunction ||
+    bareFunctionArgument
+  );
+}
+
+interface MacroDirective {
+  readonly name: string;
+  readonly rangeStart: number;
+  readonly rangeEnd: number;
+  readonly selectionStart: number;
+  /** Where the replacement text starts, after the name and any parameter list. */
+  readonly bodyStart: number;
+  readonly parameters: ReadonlySet<string>;
+}
+
+const macroDirectivePattern =
+  /^[ \t]*#[ \t]*define[ \t]+([A-Za-z_][A-Za-z0-9_]*)(\([^)]*\))?/gmu;
+const macroBuiltinNames = new Set(["__VA_ARGS__", "__VA_OPT__", "defined"]);
+
+/** `#define` directives of comment-masked source, continuation lines included. */
+function scanMacroDirectives(masked: string): MacroDirective[] {
+  const lineEnd = (from: number): number => {
+    const newline = masked.indexOf("\n", from);
+    return newline < 0 ? masked.length : newline;
+  };
+  const directives: MacroDirective[] = [];
+  for (const match of masked.matchAll(macroDirectivePattern)) {
+    const name = match[1]!;
+    const parameterList = match[2] ?? "";
+    const rangeStart = match.index ?? 0;
+    const bodyStart = rangeStart + match[0].length;
+    let lineStart = rangeStart;
+    let end = lineEnd(lineStart);
+    while (end < masked.length && /\\[ \t]*\r?$/u.test(masked.slice(lineStart, end))) {
+      lineStart = end + 1;
+      end = lineEnd(lineStart);
+    }
+    directives.push({
+      name,
+      rangeStart,
+      rangeEnd: end,
+      selectionStart: bodyStart - parameterList.length - name.length,
+      bodyStart,
+      parameters: new Set(
+        parameterList
+          .slice(1, -1)
+          .split(",")
+          .map((parameter) => parameter.replace(/[\s\\]|\.\.\./gu, ""))
+      )
+    });
+  }
+  return directives;
+}
+
 export function scanCallIndexFile(source: string): ScannedCallIndexFile {
   const masked = maskCppCommentsAndLiterals(source);
-  const rawDefinitions = scanCppFunctionDefinitions(source);
-  const symbolScopes = scanCppSymbolScopes(source, rawDefinitions);
+  const rawDefinitions = scanCppFunctionDefinitions(source, masked);
+  const symbolScopes = scanCppSymbolScopes(source, rawDefinitions, masked);
   const scopedIdentifiers = new Map<number, ScopedIdentifier>();
   for (const declaration of symbolScopes.declarations) {
     scopedIdentifiers.set(declaration.offset, {
@@ -254,6 +355,9 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
       isStatic: false
     }))
   );
+  const initializerDefinitions = definitions.filter(
+    (definition) => definition.kind === "initializer"
+  );
   const calls: IndexedCallSite[] = [];
 
   for (const caller of definitions) {
@@ -280,38 +384,19 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
             (definition) =>
               definition.rangeStart <= absoluteOffset &&
               absoluteOffset < definition.rangeEnd
+          )) ||
+        (caller.kind === "function" &&
+          initializerDefinitions.some(
+            (definition) =>
+              caller.rangeStart <= definition.rangeStart &&
+              definition.rangeEnd <= caller.rangeEnd &&
+              definition.rangeStart <= absoluteOffset &&
+              absoluteOffset < definition.rangeEnd
           ))
       ) {
         continue;
       }
-      const qualifiedStart = qualifiedPrefixStart(body, localOffset);
-      const previous = neighboringCharacter(body, qualifiedStart - 1, -1);
-      const next = neighboringCharacter(body, localOffset + callee.length, 1);
-      const directCall = hasCallParenthesisAfter(body, localOffset + callee.length);
-      const addressTaken = previous === "&";
-      const assignedFunction = previous === "=" && (next === "," || next === ";");
-      const positionalInitializerFunction =
-        caller.kind === "initializer" &&
-        (previous === "{" || previous === ",") &&
-        (next === "," || next === "}");
-      const immediateArgumentOwner =
-        previous === "("
-          ? /([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*$/u.exec(
-              body.slice(Math.max(0, qualifiedStart - 96), qualifiedStart)
-            )?.[1]
-          : undefined;
-      const bareFunctionArgument =
-        (next === "," || next === ")") &&
-        (previous === "," ||
-          (previous === "(" &&
-            immediateArgumentOwner !== undefined &&
-            !nonCallNames.has(immediateArgumentOwner)));
-      const callable =
-        directCall ||
-        addressTaken ||
-        assignedFunction ||
-        positionalInitializerFunction ||
-        bareFunctionArgument;
+      const callable = isCallableReference(body, localOffset, callee, caller.kind);
       const scopedIdentifier = scopedIdentifiers.get(absoluteOffset);
       calls.push({
         callee,
@@ -326,6 +411,53 @@ export function scanCallIndexFile(source: string): ScannedCallIndexFile {
         callerSelectionStart: caller.selectionStart,
         callerSelectionEnd: caller.selectionEnd
       });
+    }
+  }
+
+  // A file-scope macro is the caller of what its replacement text references.
+  // Directives inside or around code definitions keep their earlier
+  // attribution, and macros that reference nothing are not indexed.
+  const codeDefinitions = [...definitions];
+  for (const macro of scanMacroDirectives(masked)) {
+    if (
+      codeDefinitions.some(
+        (definition) =>
+          definition.rangeStart < macro.rangeEnd && macro.rangeStart < definition.rangeEnd
+      )
+    ) {
+      continue;
+    }
+    const body = masked.slice(macro.bodyStart, macro.rangeEnd);
+    const definition: IndexedFunctionDefinition = {
+      name: macro.name,
+      rangeStart: macro.rangeStart,
+      rangeEnd: macro.rangeEnd,
+      selectionStart: macro.selectionStart,
+      selectionEnd: macro.selectionStart + macro.name.length,
+      kind: "macro",
+      isStatic: false
+    };
+    const macroCalls: IndexedCallSite[] = [];
+    for (const match of body.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\b/gu)) {
+      const callee = match[1]!;
+      if (nonCallNames.has(callee) || macroBuiltinNames.has(callee) || macro.parameters.has(callee)) {
+        continue;
+      }
+      const localOffset = match.index ?? 0;
+      macroCalls.push({
+        callee,
+        offset: macro.bodyStart + localOffset,
+        kind: isCallableReference(body, localOffset, callee, "macro") ? "callable" : "symbol",
+        callerName: definition.name,
+        callerRangeStart: definition.rangeStart,
+        callerRangeEnd: definition.rangeEnd,
+        callerSelectionStart: definition.selectionStart,
+        callerSelectionEnd: definition.selectionEnd
+      });
+    }
+    if (macroCalls.length > 0) {
+      definitions.push(definition);
+      calls.push(...macroCalls);
     }
   }
 

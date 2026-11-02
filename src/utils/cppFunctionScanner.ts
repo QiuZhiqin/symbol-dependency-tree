@@ -105,10 +105,18 @@ function functionBeforeBrace(
   source: string,
   openBrace: number
 ): Omit<CppFunctionDefinition, "rangeEnd"> | undefined {
+  // A suffix crossing ;{}= is already rejected by isFunctionSuffix().
+  let barrier = openBrace - 1;
+  while (barrier >= 0 && !";{}=".includes(source[barrier]!)) {
+    barrier -= 1;
+  }
   let searchFrom = openBrace - 1;
   while (searchFrom >= 0) {
-    const closeParen = source.lastIndexOf(")", searchFrom);
-    if (closeParen < 0) {
+    let closeParen = searchFrom;
+    while (closeParen > barrier && source[closeParen] !== ")") {
+      closeParen -= 1;
+    }
+    if (closeParen <= barrier) {
       return undefined;
     }
     const openParen = matchingOpenParen(source, closeParen);
@@ -149,8 +157,10 @@ function functionBeforeBrace(
   return undefined;
 }
 
-export function scanCppFunctionDefinitions(source: string): CppFunctionDefinition[] {
-  const masked = maskCppCommentsAndLiterals(source);
+export function scanCppFunctionDefinitions(
+  source: string,
+  masked = maskCppCommentsAndLiterals(source)
+): CppFunctionDefinition[] {
   const definitions: CppFunctionDefinition[] = [];
   let cursor = 0;
 

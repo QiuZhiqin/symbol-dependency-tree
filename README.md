@@ -70,11 +70,9 @@ You normally do not need to rebuild the entire index. Use **Rebuild C/C++ Symbol
 
 Use `symbolDependencyTree.persistentIndex.fileExtensions` to choose which source-file extensions are indexed. Common C and C++ extensions such as `.c`, `.cpp`, `.h`, and `.hpp` are included by default.
 
-The index is stored in the `.symbol-dependency-tree` directory under the first workspace folder. Add it to the source repository's `.gitignore`:
+Use `symbolDependencyTree.persistentIndex.maxFileSizeMB` to skip very large files such as generated register headers and data tables. Files larger than 4 MB are skipped by default; set it to `0` to index every file.
 
-```gitignore
-.symbol-dependency-tree/
-```
+The index is a SQLite database in VS Code's storage for the current workspace, outside the source tree, so it needs no `.gitignore` entry. Earlier versions kept a `.symbol-dependency-tree` directory under the first workspace folder; the extension removes those old index files after it has built the new database. The index requires VS Code 1.101 or newer.
 
 The index stays on your machine. The extension does not depend on CodeGraph and does not upload source code.
 

@@ -25,6 +25,27 @@ int __sta_info_flush(struct ieee80211_sub_if_data *sdata, bool vlans)
 `;
 
 describe("C/C++ function scanner", () => {
+  it("keeps functions and multi-parenthesis signatures around numeric tables", () => {
+    const source = `
+extern "C" {
+static int table[][3] = { ${Array.from({ length: 2000 }, () => "{1, 2, 3}").join(",")} };
+int after(int value = 1) __attribute__((unused)) { return value; }
+int read() const noexcept(true) { return 1; }
+auto size() -> decltype(read()) { return read(); }
+static int other[] = { sizeof(int), 2, 3 };
+int last(void) { return 0; }
+}
+`;
+    const definitions = scanCppFunctionDefinitions(source);
+    expect(definitions.map((definition) => definition.name)).toEqual([
+      "after", "read", "size", "last"
+    ]);
+    for (const definition of definitions) {
+      expect(source.slice(definition.selectionStart, definition.selectionEnd))
+        .toBe(definition.name);
+    }
+  });
+
   it("recognizes the first function after preprocessor includes", () => {
     const source = `
 #include <linux/kernel.h>

@@ -46,9 +46,3 @@ export interface IndexedFileRecord {
   readonly objectTypes?: readonly StoredObjectType[];
   readonly virtualMembers?: readonly StoredVirtualMember[];
 }
-
-export interface PersistentIndexDocument {
-  readonly roots: readonly string[];
-  readonly files: readonly IndexedFileRecord[];
-  readonly deletedUris: readonly string[];
-}

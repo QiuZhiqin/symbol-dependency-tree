@@ -1,5 +1,5 @@
 import type { CppFunctionDefinition } from "./cppFunctionScanner";
-import { maskCppCommentsAndLiterals } from "./textScanner";
+import { blankPreservingLineBreaks, maskCppCommentsAndLiterals } from "./textScanner";
 
 export type IndexedSymbolScope =
   | {
@@ -34,6 +34,7 @@ export interface ScopedIdentifier {
 
 export interface IndexedGlobalInitializer extends CppFunctionDefinition {
   readonly typeName?: string;
+  readonly scope?: IndexedSymbolScope;
 }
 
 export interface IndexedObjectType {
@@ -98,17 +99,20 @@ interface LocalDeclaration {
   readonly offset: number;
   readonly scopeStart: number;
   readonly typeName?: string;
+  readonly ownerPath?: IndexedMemberOwnerPath;
 }
 
 interface ParsedDeclaration {
   readonly name: string;
   readonly offset: number;
   readonly typeName?: string;
+  readonly ownerPath?: IndexedMemberOwnerPath;
 }
 
-interface GlobalInitializerRange extends IndexedGlobalInitializer {
+interface InitializerRange extends IndexedGlobalInitializer {
   readonly openTokenIndex: number;
   readonly closeTokenIndex: number;
+  readonly containingFunctionSelectionStart?: number;
 }
 
 const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*$/u;
@@ -166,7 +170,8 @@ function isIdentifier(token: Token | undefined): token is Token {
 }
 
 function maskPreprocessorDirectives(source: string): string {
-  const characters = [...source];
+  const parts: string[] = [];
+  let copied = 0;
   let lineStart = 0;
   let inDirective = false;
   while (lineStart < source.length) {
@@ -174,18 +179,16 @@ function maskPreprocessorDirectives(source: string): string {
     const lineEnd = newline < 0 ? source.length : newline + 1;
     const line = source.slice(lineStart, lineEnd);
     if (inDirective || /^[ \t]*#/u.test(line)) {
-      for (let index = lineStart; index < lineEnd; index += 1) {
-        if (characters[index] !== "\n" && characters[index] !== "\r") {
-          characters[index] = " ";
-        }
-      }
+      parts.push(source.slice(copied, lineStart), blankPreservingLineBreaks(line));
+      copied = lineEnd;
       inDirective = /\\[ \t]*(?:\r?\n)?$/u.test(line);
     } else {
       inDirective = false;
     }
     lineStart = lineEnd;
   }
-  return characters.join("");
+  parts.push(source.slice(copied));
+  return parts.join("");
 }
 
 function tokenize(source: string): Token[] {
@@ -578,6 +581,50 @@ function inferredAutoType(
   return undefined;
 }
 
+function inferredAutoOwnerPath(
+  tokens: readonly Token[],
+  declaratorIndex: number
+): IndexedMemberOwnerPath | undefined {
+  const equals = tokens.findIndex(
+    (token, index) => index > declaratorIndex && token.text === "="
+  );
+  const root = equals < 0 ? undefined : tokens[equals + 1];
+  if (!isIdentifier(root)) {
+    return undefined;
+  }
+  const members: string[] = [];
+  let calledMember = false;
+  let index = equals + 2;
+  while (index < tokens.length) {
+    const operator = tokens[index]?.text;
+    const member = tokens[index + 1];
+    if ((operator !== "." && operator !== "->") || !isIdentifier(member)) {
+      break;
+    }
+    members.push(member.text);
+    index += 2;
+    if (tokens[index]?.text !== "(") {
+      continue;
+    }
+    calledMember = true;
+    let depth = 0;
+    for (; index < tokens.length; index += 1) {
+      if (tokens[index]?.text === "(") {
+        depth += 1;
+      } else if (tokens[index]?.text === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          index += 1;
+          break;
+        }
+      }
+    }
+  }
+  return members.length === 0 || !calledMember || index !== tokens.length
+    ? undefined
+    : { rootOwner: root.text, members };
+}
+
 function parseDeclarationSegment(rawTokens: readonly Token[]): ParsedDeclaration[] {
   let tokens = [...rawTokens];
   while (
@@ -693,11 +740,21 @@ function parseDeclarationSegment(rawTokens: readonly Token[]): ParsedDeclaration
 
   const declarator = tokens[declaratorIndex]!;
   let typeName = typeNameBefore(tokens, declaratorIndex);
+  const ownerPath = tokens
+    .slice(0, declaratorIndex)
+    .some((token) => token.text === "auto")
+    ? inferredAutoOwnerPath(tokens, declaratorIndex)
+    : undefined;
   if (typeName === "auto") {
     typeName = inferredAutoType(tokens, declaratorIndex) ?? typeName;
   }
   const declarations: ParsedDeclaration[] = [
-    { name: declarator.text, offset: declarator.start, typeName }
+    {
+      name: declarator.text,
+      offset: declarator.start,
+      typeName,
+      ...(ownerPath === undefined ? {} : { ownerPath })
+    }
   ];
 
   parenDepth = 0;
@@ -768,6 +825,13 @@ function directTypeTokens(
       continue;
     }
     if (token.text === "{") {
+      if (
+        braceDepth === 0 &&
+        statement.some((candidate) => candidate.text === ")")
+      ) {
+        statements.push(statement);
+        statement = [];
+      }
       braceDepth += 1;
       continue;
     }
@@ -839,13 +903,13 @@ function directEnumDeclarations(
   return declarations;
 }
 
-function scanGlobalInitializers(
+function scanInitializers(
   tokens: readonly Token[],
   bracePairs: ReadonlyMap<number, number>,
   definitions: readonly CppFunctionDefinition[],
   typeRanges: readonly TypeRange[]
-): GlobalInitializerRange[] {
-  const initializers: GlobalInitializerRange[] = [];
+): InitializerRange[] {
+  const initializers: InitializerRange[] = [];
   for (let openTokenIndex = 0; openTokenIndex < tokens.length; openTokenIndex += 1) {
     const open = tokens[openTokenIndex];
     const equalsIndex = openTokenIndex - 1;
@@ -858,10 +922,6 @@ function scanGlobalInitializers(
       continue;
     }
     if (
-      definitions.some(
-        (definition) =>
-          definition.rangeStart <= open.start && open.start < definition.rangeEnd
-      ) ||
       typeRanges.some(
         (range) => range.openBrace < open.start && open.start < range.closeBrace
       ) ||
@@ -873,6 +933,10 @@ function scanGlobalInitializers(
     ) {
       continue;
     }
+    const containingFunction = definitions.find(
+      (definition) =>
+        definition.rangeStart <= open.start && open.start < definition.rangeEnd
+    );
 
     let declarationStart = equalsIndex - 1;
     while (
@@ -896,7 +960,17 @@ function scanGlobalInitializers(
       selectionStart: declaration.offset,
       selectionEnd: declaration.offset + declaration.name.length,
       openTokenIndex,
-      closeTokenIndex
+      closeTokenIndex,
+      ...(containingFunction === undefined
+        ? {}
+        : {
+            containingFunctionSelectionStart: containingFunction.selectionStart,
+            scope: {
+              kind: "local" as const,
+              functionSelectionStart: containingFunction.selectionStart,
+              declarationOffset: declaration.offset
+            }
+          })
     });
   }
   return initializers;
@@ -905,22 +979,37 @@ function scanGlobalInitializers(
 function scanFileScopeObjectTypes(
   tokens: readonly Token[],
   bracePairs: ReadonlyMap<number, number>,
-  initializers: readonly GlobalInitializerRange[]
+  initializers: readonly InitializerRange[],
+  namespaceRanges: readonly NamespaceRange[]
 ): IndexedObjectType[] {
-  const declarations: ParsedDeclaration[] = initializers.map((initializer) => ({
-    name: initializer.name,
-    offset: initializer.selectionStart,
-    typeName: initializer.typeName
-  }));
+  const declarations: ParsedDeclaration[] = initializers.flatMap((initializer) =>
+    initializer.containingFunctionSelectionStart === undefined
+      ? [{
+          name: initializer.name,
+          offset: initializer.selectionStart,
+          typeName: initializer.typeName
+        }]
+      : []
+  );
+  const namespaceOpens = new Set(namespaceRanges.map((range) => range.openBrace));
+  const namespaceCloses = new Set(namespaceRanges.map((range) => range.closeBrace));
   let statementStart = 0;
   for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
     const token = tokens[tokenIndex];
     if (token?.text === "{") {
+      if (namespaceOpens.has(token.start)) {
+        statementStart = tokenIndex + 1;
+        continue;
+      }
       const closeTokenIndex = bracePairs.get(tokenIndex);
       if (closeTokenIndex !== undefined) {
         tokenIndex = closeTokenIndex;
         statementStart = closeTokenIndex + 1;
       }
+      continue;
+    }
+    if (token?.text === "}" && namespaceCloses.has(token.start)) {
+      statementStart = tokenIndex + 1;
       continue;
     }
     if (token?.text !== ";") {
@@ -1176,6 +1265,9 @@ function ownerPathForReceiver(
     declarations,
     parents
   );
+  if (local?.ownerPath !== undefined) {
+    return local.ownerPath;
+  }
   const declaredOwner =
     local?.typeName ??
     globalTypes.get(receiver.text) ??
@@ -1234,15 +1326,16 @@ function ownerForExplicitMember(
 
 export function scanCppSymbolScopes(
   source: string,
-  definitions: readonly CppFunctionDefinition[]
+  definitions: readonly CppFunctionDefinition[],
+  maskedSource = maskCppCommentsAndLiterals(source)
 ): CppSymbolScopeScan {
-  const masked = maskPreprocessorDirectives(maskCppCommentsAndLiterals(source));
+  const masked = maskPreprocessorDirectives(maskedSource);
   const tokens = tokenize(masked);
   const braces = matchingTokenIndexes(tokens, "{", "}");
   const parens = matchingTokenIndexes(tokens, "(", ")");
   const typeRanges = scanTypeRanges(tokens, braces.opensToCloses);
   const namespaceRanges = scanNamespaceRanges(tokens, braces.opensToCloses);
-  const initializerRanges = scanGlobalInitializers(
+  const initializerRanges = scanInitializers(
     tokens,
     braces.opensToCloses,
     definitions,
@@ -1251,7 +1344,8 @@ export function scanCppSymbolScopes(
   const objectTypes = scanFileScopeObjectTypes(
     tokens,
     braces.opensToCloses,
-    initializerRanges
+    initializerRanges,
+    namespaceRanges
   );
   const globalTypes = new Map<string, string | undefined>();
   for (const objectType of objectTypes) {
@@ -1374,6 +1468,16 @@ export function scanCppSymbolScopes(
       bodyCloseIndex,
       parens.closesToOpens
     )) {
+      if (
+        initializerRanges.some(
+          (initializer) =>
+            initializer.containingFunctionSelectionStart === definition.selectionStart &&
+            initializer.openTokenIndex < start &&
+            start < initializer.closeTokenIndex
+        )
+      ) {
+        continue;
+      }
       for (const declaration of parseDeclarationSegment(
         declarationSlice(tokens, start, bodyCloseIndex)
       )) {
@@ -1461,10 +1565,12 @@ export function scanCppSymbolScopes(
     declarations,
     identifiers,
     functionOwners,
-    initializers: initializerRanges.map(
-      ({ openTokenIndex: _open, closeTokenIndex: _close, ...initializer }) =>
-        initializer
-    ),
+    initializers: initializerRanges.map(({
+      openTokenIndex: _open,
+      closeTokenIndex: _close,
+      containingFunctionSelectionStart: _function,
+      ...initializer
+    }) => initializer),
     inheritances: typeRanges.flatMap((range) =>
       range.baseTypes.map((base) => ({ derived: range.name, base }))
     ),

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0
+
+- Store the symbol index in a SQLite database (the built-in `node:sqlite` of VS Code 1.101 or newer) in VS Code's workspace storage instead of a gzip snapshot under the first workspace folder. Queries read only the rows they need, so large workspaces no longer keep the whole index in memory or reload it at startup. Index files from earlier versions are removed after the first successful build.
+- Index references inside file-scope `#define` replacement text, so a function called only through a macro such as `RTMPInitTimer` shows the macro as its caller, and the macro's own callers below it. Macro parameters are not indexed as references, and macros that reference nothing are left out.
+- Skip files larger than `symbolDependencyTree.persistentIndex.maxFileSizeMB` (4 MB by default), such as generated register headers and data tables.
+- Speed up indexing by masking comments, literals, and preprocessor lines without per-character arrays, and by skipping the qualified-name scan for identifiers that are not preceded by `::`; large data tables no longer make function detection quadratic.
+- Recognize a designated-initializer callback without a trailing comma, such as `.pfHandler = UniCmdBssInfoBcnOffloadWrapAll }`, so the callback table shows up as its caller.
+- Read and mask each referenced file once per expansion when building reference previews, re-reading only when the document changes, and refresh trees in background tabs when they are shown.
+- Apply nearby file updates as one batch, and skip the refresh notification when a reopened index has nothing to update.
+
 ## 0.10.0
 
 - Jump to the symbol definition when clicking a root node name, whether the tree was generated at the definition site or at any call site.

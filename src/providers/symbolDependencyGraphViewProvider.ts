@@ -23,8 +23,16 @@ import { graphNodeLabel } from "../utils/graphLabels";
 import { layoutVariableWidthGraph } from "../utils/graphLayout";
 import { primaryGraphReference } from "../utils/graphNavigation";
 import { expandReferenceSelection } from "../utils/sourceSelection";
+import { maskCppCommentsAndLiterals } from "../utils/textScanner";
 
 type GraphStatus = GraphStatePayload["status"];
+
+interface ReferenceSource {
+  readonly document: vscode.TextDocument;
+  version: number;
+  source: string;
+  masked: string;
+}
 
 interface WebviewMessage {
   readonly type:
@@ -52,6 +60,7 @@ interface GraphDocument {
   status?: GraphStatus;
   nodeSequence: number;
   measurements: readonly GraphNodeMeasurement[];
+  dirty?: boolean;
 }
 
 export interface GraphTabSnapshot {
@@ -228,7 +237,9 @@ export class SymbolDependencyGraphViewProvider
       document.root = { origin, nodeId: rootId };
       this.activeDocumentId = document.id;
       this.postState();
-      if (!rootNode.loaded && !rootNode.loading) {
+      if (document.dirty) {
+        await this.invalidateDocument(document);
+      } else if (!rootNode.loaded && !rootNode.loading) {
         await this.expandNode(document, rootId);
       }
       return;
@@ -320,6 +331,11 @@ export class SymbolDependencyGraphViewProvider
         this.documentOrder[Math.min(index, this.documentOrder.length - 1)] ??
         this.documentOrder.at(-1);
     }
+    const active = this.activeDocument();
+    if (active?.dirty) {
+      void this.invalidateDocument(active);
+      return;
+    }
     this.postState();
   }
 
@@ -333,12 +349,16 @@ export class SymbolDependencyGraphViewProvider
 
   public async invalidateAll(): Promise<void> {
     this.cache.clear();
-    await Promise.all(
-      this.documentOrder.flatMap((id) => {
-        const document = this.documents.get(id);
-        return document === undefined ? [] : [this.invalidateDocument(document)];
-      })
-    );
+    const active = this.activeDocument();
+    for (const document of this.documents.values()) {
+      if (document !== active) {
+        document.session.renew();
+        document.dirty = true;
+      }
+    }
+    if (active !== undefined) {
+      await this.invalidateDocument(active);
+    }
   }
 
   public async invalidateUri(uri: vscode.Uri): Promise<void> {
@@ -368,6 +388,7 @@ export class SymbolDependencyGraphViewProvider
   }
 
   private async invalidateDocument(document: GraphDocument): Promise<void> {
+    document.dirty = false;
     document.session.renew();
     const rootId = document.root?.nodeId;
     if (rootId === undefined) {
@@ -456,9 +477,10 @@ export class SymbolDependencyGraphViewProvider
         readonly cycle: boolean;
         readonly references: GraphReference[];
       }> = [];
+      const sources = new Map<string, Promise<ReferenceSource>>();
       for (const scope of result.scopes) {
         const path = extendAncestorPath(node.ancestorIds, scope.id);
-        const references = await this.referencePayloads(scope, owns);
+        const references = await this.referencePayloads(scope, owns, sources);
         if (!owns()) {
           return;
         }
@@ -524,24 +546,42 @@ export class SymbolDependencyGraphViewProvider
 
   private async referencePayloads(
     scope: ScopeReference,
-    owns: () => boolean
+    owns: () => boolean,
+    sources: Map<string, Promise<ReferenceSource>>
   ): Promise<GraphReference[]> {
-    return Promise.all(scope.references.map((hit) => this.referencePayload(hit, owns)));
+    return Promise.all(scope.references.map((hit) => this.referencePayload(hit, owns, sources)));
   }
 
   private async referencePayload(
     hit: ReferenceHit,
-    owns: () => boolean
+    owns: () => boolean,
+    sources: Map<string, Promise<ReferenceSource>>
   ): Promise<GraphReference> {
     let preview = "File is unavailable";
     let range = hit.range;
     try {
-      const document = await vscode.workspace.openTextDocument(hit.uri);
+      const key = hit.uri.toString();
+      let pending = sources.get(key);
+      if (pending === undefined) {
+        pending = Promise.resolve(vscode.workspace.openTextDocument(hit.uri)).then((document) => {
+          const source = document.getText();
+          return { document, version: document.version, source, masked: maskCppCommentsAndLiterals(source) };
+        });
+        sources.set(key, pending);
+      }
+      const cached = await pending;
+      if (cached.version !== cached.document.version) {
+        cached.source = cached.document.getText();
+        cached.masked = maskCppCommentsAndLiterals(cached.source);
+        cached.version = cached.document.version;
+      }
+      const { document, source, masked } = cached;
       preview = document.lineAt(hit.range.start.line).text.trim();
       const expanded = expandReferenceSelection(
-        document.getText(),
+        source,
         document.offsetAt(hit.range.start),
-        document.offsetAt(hit.range.end)
+        document.offsetAt(hit.range.end),
+        masked
       );
       range = new vscode.Range(
         document.positionAt(expanded.start),
@@ -565,7 +605,12 @@ export class SymbolDependencyGraphViewProvider
     if (message.type === "selectTab") {
       if (message.tabId !== undefined && this.documents.has(message.tabId)) {
         this.activeDocumentId = message.tabId;
-        this.postState();
+        const document = this.documents.get(message.tabId)!;
+        if (document.dirty) {
+          await this.invalidateDocument(document);
+        } else {
+          this.postState();
+        }
       }
       return;
     }

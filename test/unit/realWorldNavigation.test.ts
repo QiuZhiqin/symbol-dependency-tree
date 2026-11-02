@@ -2,7 +2,7 @@
 // fakes to keep the fixture readable.
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { readFileSync } from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 
 // Real-world regression check: runs the full navigation chain against the
 // actual prplMesh/libvbss/mtk7990k sources — the call to the free function
@@ -225,6 +225,7 @@ import { QueryCache } from "../../src/services/queryCache";
 import { ReferenceResolver } from "../../src/services/referenceResolver";
 import { PersistentCallIndex } from "../../src/services/persistentCallIndex";
 import { SymbolResolver } from "../../src/services/symbolResolver";
+import { createTempStorage } from "./helpers/tempStorage";
 
 const token = { isCancellationRequested: false } as vscode.CancellationToken;
 const fixtures = (vscode as unknown as {
@@ -238,10 +239,15 @@ const fixtures = (vscode as unknown as {
 describe("real-world vbss_if_get_sta_entry navigation", () => {
   it("binds the 4-argument facade from a call inside a member function", async () => {
     const output = { appendLine: () => undefined, error: () => undefined };
+    const storage = createTempStorage();
     const index = new PersistentCallIndex(
-      vscode.Uri.parse("file:///e:/real") as vscode.Uri,
+      storage.uri,
       output as unknown as vscode.OutputChannel
     );
+    onTestFinished(() => {
+      index.dispose();
+      storage.remove();
+    });
     await index.ensureReady(token);
     expect(index.status().phase).toBe("ready");
     expect(index.status().stats.files).toBe(fixtures.fileCount);

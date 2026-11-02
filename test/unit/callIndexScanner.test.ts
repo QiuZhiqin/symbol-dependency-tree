@@ -42,6 +42,27 @@ int ieee80211_process_action(struct ieee80211_mgmt *mgmt)
 `;
 
 describe("persistent call-index scanner", () => {
+  it.each(["", ","])("indexes designated callbacks with terminator %j", (comma) => {
+    const source = `
+static int UniCmdBssInfoBcnOffloadWrapAll(void *ctx) { return 0; }
+struct handler { int feature; int (*pfHandler)(void *); };
+static struct handler UniCmdBssInfoTab[] = {
+#ifdef CONFIG_AP_SUPPORT
+  { .feature = 1, .pfHandler = UniCmdBssInfoBcnOffloadWrapAll${comma} },
+#endif
+};
+`;
+    const indexed = scanCallIndexFile(source);
+    const calls = indexed.calls.filter(
+      (call) => call.callee === "UniCmdBssInfoBcnOffloadWrapAll"
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      kind: "callable",
+      callerName: "UniCmdBssInfoTab"
+    });
+  });
+
   it("stores exact direct and macro-nested call sites", () => {
     const indexed = scanCallIndexFile(linuxStaInfoSample);
     const calls = indexed.calls.filter(
@@ -550,6 +571,61 @@ void dispatch_external(void)
     ]);
   });
 
+  it("preserves the receiver chain for members called through an auto result", () => {
+    const source = `
+class Controller {
+public:
+  bool update_agent_vbss_capabilities(int agent);
+};
+
+class db {
+public:
+  Controller *get_controller_ctx() { return m_controller_ctx; }
+
+private:
+  Controller *m_controller_ctx;
+};
+
+namespace actions {
+db *g_database = nullptr;
+
+bool update_vbss_capabilities(int agent)
+{
+  auto controller_ctx = g_database->get_controller_ctx();
+  return controller_ctx->update_agent_vbss_capabilities(agent);
+}
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const call = indexed.calls.find(
+      (candidate) =>
+        candidate.callee === "update_agent_vbss_capabilities" &&
+        candidate.callerName === "update_vbss_capabilities"
+    );
+
+    expect(indexed.objectTypes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "g_database", typeName: "db" })
+      ])
+    );
+    expect(
+      indexed.declarations.find(
+        (declaration) =>
+          declaration.scope.kind === "member" &&
+          declaration.scope.owner === "db" &&
+          declaration.name === "get_controller_ctx"
+      )?.typeName
+    ).toBe("Controller");
+    expect(call).toMatchObject({
+      kind: "callable",
+      scope: { kind: "member", owner: "get_controller_ctx" },
+      memberOwnerPath: {
+        rootOwner: "g_database",
+        members: ["get_controller_ctx"]
+      }
+    });
+  });
+
   it("indexes inheritance, virtual overrides, and base-typed dispatch calls", () => {
     const source = `
 class Task {
@@ -673,6 +749,76 @@ struct PRIVATE_SHOW_PROC RTMP_PRIVATE_AP_SHOW_SUPPORT_PROC[] = {
     });
   });
 
+  it("uses a function-local callback table as the callback parent", () => {
+    const source = `
+namespace actions {
+using callback_t = int (*)(int value);
+
+struct sFunctions {
+  const char *name;
+  const char *path;
+  callback_t callback;
+};
+
+int update_vbss_capabilities(int value)
+{
+  return value;
+}
+
+void get_func_list()
+{
+  const std::vector<sFunctions> functions_list = {
+    {"update_vbss_capabilities", "Device.UpdateVBSSCapabilities",
+     update_vbss_capabilities},
+  };
+  consume(functions_list);
+}
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const callback = indexed.calls.find(
+      (call) => call.callee === "update_vbss_capabilities"
+    );
+
+    const initializer = indexed.definitions.find(
+      (definition) =>
+        definition.kind === "initializer" && definition.name === "functions_list"
+    );
+    const containingFunction = indexed.definitions.find(
+      (definition) =>
+        definition.kind === "function" && definition.name === "get_func_list"
+    );
+
+    expect(initializer).toMatchObject({
+      scope: {
+        kind: "local",
+        functionSelectionStart: containingFunction?.selectionStart,
+        declarationOffset: initializer?.selectionStart
+      }
+    });
+    expect(
+      indexed.objectTypes.some((objectType) => objectType.name === "functions_list")
+    ).toBe(false);
+    expect(callback).toMatchObject({
+      kind: "callable",
+      callerName: "functions_list",
+      implicitMemberOwner: "actions"
+    });
+    expect(
+      indexed.calls.some(
+        (call) =>
+          call.callee === "update_vbss_capabilities" &&
+          call.callerName === "get_func_list"
+      )
+    ).toBe(false);
+    expect(
+      indexed.calls.find(
+        (call) =>
+          call.callee === "functions_list" && call.callerName === "get_func_list"
+      )?.scope
+    ).toEqual(initializer?.scope);
+  });
+
   it("indexes a type contained by another type and used by a function", () => {
     const source = `
 struct A {
@@ -699,5 +845,79 @@ void C(struct A *arg)
 
     expect(typeDefinitions).toEqual(["A", "B"]);
     expect(references).toEqual(["C", "C", "B"]);
+  });
+
+  it("classifies namespace-qualified callbacks like unqualified ones", () => {
+    const source = `static int cb(void) { return 0; }
+namespace ns { int cb2(void); }
+struct handler_entry handlers[] = {
+    { .handler = ns::cb2, },
+    { .handler = ns :: inner ::
+      cb3, },
+    { .handler = cb },
+};
+`;
+    const kinds = scanCallIndexFile(source)
+      .calls.filter((call) => call.callerName === "handlers")
+      .map((call) => `${call.callee}:${call.kind}`);
+
+    expect(kinds).toEqual([
+      "handler_entry:symbol",
+      "handler:symbol",
+      "ns:symbol",
+      "cb2:callable",
+      "handler:symbol",
+      "ns:symbol",
+      "inner:symbol",
+      "cb3:callable",
+      "handler:symbol",
+      "cb:callable"
+    ]);
+  });
+
+  it("attributes a continued directive to its macro, not to the code after it", () => {
+    const source = "#define WRAP(x) \\\n  helper(x)\nint run(void) { return helper(1); }\n";
+
+    expect(
+      scanCallIndexFile(source).calls.map((call) => `${call.callee}@${call.offset}:${call.callerName}`)
+    ).toEqual(["helper@53:run", "helper@20:WRAP"]);
+  });
+
+  it("attributes references in file-scope macro bodies to the macro", () => {
+    const source = `void physical_device_init_timer(void *ad, void *dev, void *timer, void *fn, void *data, int repeat, const char *name)
+{
+}
+
+#define RTMPInitTimer(_pAd, _pTimer, _pTimerFunc, _pData, _Repeat) \\
+physical_device_init_timer(\\
+	_pAd, ((struct _RTMP_ADAPTER *)_pAd)->physical_dev, \\
+	_pTimer, _pTimerFunc, _pData, _Repeat, #_pTimer)
+
+#define REG_BASE 0x1000
+#define REG_CTRL (REG_BASE + 4)
+
+void start(void)
+{
+#define LOCAL_HELPER(x) local_target(x)
+	RTMPInitTimer(0, 0, 0, 0, 0);
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const macro = indexed.definitions.find((definition) => definition.name === "RTMPInitTimer");
+
+    // REG_BASE references nothing, and LOCAL_HELPER sits inside start().
+    expect(indexed.definitions.filter((definition) => definition.kind === "macro").map((definition) => definition.name))
+      .toEqual(["RTMPInitTimer", "REG_CTRL"]);
+    expect(source.slice(macro!.selectionStart, macro!.selectionEnd)).toBe("RTMPInitTimer");
+    expect(source.slice(macro!.rangeEnd - 9, macro!.rangeEnd)).toBe("#_pTimer)");
+    expect(
+      indexed.calls
+        .filter((call) => call.callerName === "RTMPInitTimer")
+        .map((call) => `${call.callee}:${call.kind}`)
+    ).toEqual(["physical_device_init_timer:callable", "_RTMP_ADAPTER:symbol", "physical_dev:symbol"]);
+    expect(indexed.calls.filter((call) => call.callerName === "REG_CTRL").map((call) => call.callee))
+      .toEqual(["REG_BASE"]);
+    expect(indexed.calls.find((call) => call.callee === "local_target")?.callerName).toBe("start");
+    expect(indexed.calls.find((call) => call.callee === "RTMPInitTimer")?.callerName).toBe("start");
   });
 });
