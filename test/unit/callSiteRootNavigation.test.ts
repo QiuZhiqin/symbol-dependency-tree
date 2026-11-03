@@ -469,6 +469,52 @@ async function flushUpdates(index: PersistentCallIndex): Promise<void> {
 }
 
 describe("call-site root navigation binds the definition", () => {
+  it("rebuilds unchanged files when upgrading the old scope semantics", async () => {
+    const initial = await buildIndex();
+    initial.dispose();
+    const { DatabaseSync } = await import("node:sqlite");
+    const database = new DatabaseSync(databaseFile());
+    database.exec("PRAGMA user_version = 2");
+    database.close();
+
+    const replace = vi.spyOn(CallIndexDatabase.prototype, "replaceFile");
+    const reopened = await buildIndex();
+
+    expect(reopened.stats().files).toBe(7);
+    expect(replace).toHaveBeenCalledTimes(7);
+  });
+
+  it("finds global callers in control conditions and unbraced bodies", async () => {
+    const functionUri = vscode.Uri.parse("file:///e:/sdt-fixture/condition_target.cpp");
+    const functionText = "int condition_target(int x) { return x; }\n";
+    const userUri = vscode.Uri.parse("file:///e:/sdt-fixture/condition_user.cpp");
+    const userText = `void conditional_user(int a) {
+  if (a) condition_target(a);
+  while (a) condition_target(a);
+  if (a && condition_target(a)) {}
+  for (int i = 0; a && condition_target(a); ++i) {}
+  if (int value(1); a && condition_target(a)) {}
+}
+`;
+    for (const [uri, text] of [[functionUri, functionText], [userUri, userText]] as const) {
+      fixtures.documents.set(uri.toString(), fixtures.makeDocument(uri, text));
+    }
+    const fixtureUris = await vscode.workspace.findFiles("", "");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([...fixtureUris, functionUri, userUri]);
+    const index = await buildIndex();
+    const resolver = new ReferenceResolver(index, new QueryCache());
+
+    for (const [uri, text] of [[functionUri, functionText], [userUri, userText]] as const) {
+      const document = fixtures.makeDocument(uri, text);
+      const target = await new SymbolResolver().resolveAt(uri, document.positionAt(text.indexOf("condition_target")), token);
+      const result = await resolver.resolve(target!, token);
+
+      expect(result.definition?.uri.toString()).toBe(functionUri.toString());
+      expect(result.scopes.map((scope) => scope.name)).toEqual(["conditional_user"]);
+      expect(result.scopes[0]!.references).toHaveLength(5);
+    }
+  });
+
   it("reopens an unchanged database without rewriting files or notifying", async () => {
     const initial = await buildIndex();
     initial.dispose();

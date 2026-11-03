@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Keep calls in control conditions and unbraced bodies from being mistaken for local declarations, while preserving real condition variables and init-statements. Rebuild existing indexes once to replace the old scope metadata.
+
 ## 0.11.0
 
 - Store the symbol index in a SQLite database (the built-in `node:sqlite` of VS Code 1.101 or newer) in VS Code's workspace storage instead of a gzip snapshot under the first workspace folder. Queries read only the rows they need, so large workspaces no longer keep the whole index in memory or reload it at startup. Index files from earlier versions are removed after the first successful build.

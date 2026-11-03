@@ -16,7 +16,7 @@ import type {
 } from "../utils/cppSymbolScopes";
 
 /** Bump when the table layout or stored semantics change; older databases are rebuilt. */
-const schemaVersion = 2;
+const schemaVersion = 3;
 
 const definitionKinds = ["function", "initializer", "type", "macro"] as const;
 const typeKinds = ["class", "enum", "struct", "union"] as const;

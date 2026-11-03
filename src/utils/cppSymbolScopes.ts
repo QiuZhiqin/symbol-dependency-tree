@@ -1111,8 +1111,9 @@ function declarationStarts(
   bodyOpenIndex: number,
   bodyCloseIndex: number,
   parenClosesToOpens: ReadonlyMap<number, number>
-): number[] {
+): { readonly index: number; readonly isCondition: boolean }[] {
   const starts = new Set<number>();
+  const conditions = new Set<number>();
   if (bodyOpenIndex + 1 < bodyCloseIndex) {
     starts.add(bodyOpenIndex + 1);
   }
@@ -1126,6 +1127,30 @@ function declarationStarts(
       controlNames.has(tokens[index - 2]?.text ?? "")
     ) {
       starts.add(index);
+      const control = tokens[index - 2]!.text;
+      if (control !== "catch") {
+        // Only the condition requires a brace-or-equal initializer. Keep
+        // for/if/switch init-statements and range-for declarations unchanged.
+        let conditionStart = control === "for" ? undefined : index;
+        let depth = 0;
+        for (let cursor = index; cursor < bodyCloseIndex; cursor += 1) {
+          const text = tokens[cursor]!.text;
+          if (text === ")" && depth === 0) {
+            break;
+          }
+          if (text === ";" && depth === 0 && (control !== "for" || conditionStart === undefined)) {
+            conditionStart = cursor + 1;
+          }
+          if (["(", "[", "{"].includes(text)) {
+            depth += 1;
+          } else if ([")", "]", "}"].includes(text)) {
+            depth -= 1;
+          }
+        }
+        if (conditionStart !== undefined) {
+          conditions.add(conditionStart);
+        }
+      }
     }
     if (previous?.text === ")") {
       const open = parenClosesToOpens.get(index - 1);
@@ -1140,7 +1165,9 @@ function declarationStarts(
       starts.add(index);
     }
   }
-  return [...starts].sort((left, right) => left - right);
+  return [...starts]
+    .sort((left, right) => left - right)
+    .map((index) => ({ index, isCondition: conditions.has(index) }));
 }
 
 function declarationSlice(
@@ -1149,14 +1176,49 @@ function declarationSlice(
   bodyCloseIndex: number
 ): Token[] {
   const result: Token[] = [];
+  let depth = 0;
   for (let index = start; index < bodyCloseIndex; index += 1) {
     const token = tokens[index];
     if (token === undefined || [";", "{", "}"].includes(token.text)) {
       break;
     }
+    if (token.text === "(") {
+      depth += 1;
+    } else if (token.text === ")") {
+      if (depth === 0) {
+        break;
+      }
+      depth -= 1;
+    }
     result.push(token);
   }
   return result;
+}
+
+function hasConditionInitializer(tokens: readonly Token[], declarationOffset: number): boolean {
+  let index = tokenIndexAtOrAfter(tokens, declarationOffset) + 1;
+  // A function-pointer declarator ends after its closing paren and signature,
+  // not immediately after the name: if (int (*fn)(int) = pick()).
+  if (
+    tokens[index]?.text === ")" &&
+    ["*", "&"].includes(tokens[index - 2]?.text ?? "") &&
+    tokens[index - 3]?.text === "("
+  ) {
+    index += 1;
+    while (["(", "["].includes(tokens[index]?.text ?? "")) {
+      let depth = 1;
+      for (index += 1; index < tokens.length && depth > 0; index += 1) {
+        const text = tokens[index]!.text;
+        if (text === "(" || text === "[") {
+          depth += 1;
+        } else if (text === ")" || text === "]") {
+          depth -= 1;
+        }
+      }
+    }
+  }
+  // Inspect the original tokens: declarationSlice stops before a braced init.
+  return tokens[index]?.text === "=" || tokens[index]?.text === "{";
 }
 
 function buildLexicalScopes(
@@ -1462,7 +1524,7 @@ export function scanCppSymbolScopes(
         locals.push({ ...declaration, scopeStart: rootScope });
       }
     }
-    for (const start of declarationStarts(
+    for (const { index: start, isCondition } of declarationStarts(
       tokens,
       bodyOpenIndex,
       bodyCloseIndex,
@@ -1481,6 +1543,9 @@ export function scanCppSymbolScopes(
       for (const declaration of parseDeclarationSegment(
         declarationSlice(tokens, start, bodyCloseIndex)
       )) {
+        if (isCondition && !hasConditionInitializer(tokens, declaration.offset)) {
+          continue;
+        }
         locals.push({
           ...declaration,
           scopeStart:

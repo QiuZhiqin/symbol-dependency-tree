@@ -875,6 +875,88 @@ struct handler_entry handlers[] = {
     ]);
   });
 
+  it.each([
+    "if (a)\n foo(a, &a);",
+    "if (a)\n foo();",
+    "while (a)\n foo(a);",
+    "if (a && g(a)) h();",
+    "if (a & g(a)) h();",
+    "if (a || g(a)) h();",
+    "while (a && g(a)) { h(); }",
+    "switch (a && g(a)) { default: break; }",
+    "for (int i = 0; a && g(a); ++i) h();",
+    "if (int value(1); a && g(a)) h();",
+    "switch (int value(1); a && g(a)) { default: break; }",
+    "if (a) foo(a); foo(a);"
+  ])("does not turn a control-expression call into a declaration: %s", (statement) => {
+    const source = `void run(int a) {\n${statement}\n}`;
+    const indexed = scanCallIndexFile(source);
+    const calls = indexed.calls.filter((call) => call.callee === "foo" || call.callee === "g");
+
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.kind).toBe("callable");
+      expect(call.scope).toBeUndefined();
+      expect(source.slice(call.offset, call.offset + call.callee.length)).toBe(call.callee);
+    }
+    expect(indexed.declarations.filter((declaration) => declaration.name === "foo" || declaration.name === "g"))
+      .toEqual([]);
+  });
+
+  it.each([
+    "if (a) { foo(a); }",
+    "foo(a, &a);",
+    "if (a) {} else\n foo(a);",
+    "for (;;)\n foo(a);",
+    "int value = a && g(a);",
+    "value = a && g(a);",
+    "return a && g(a);"
+  ])("preserves ordinary expression scopes: %s", (statement) => {
+    const indexed = scanCallIndexFile(`void run(int a) {\n${statement}\n}`);
+    const calls = indexed.calls.filter((call) => call.callee === "foo" || call.callee === "g");
+
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((call) => call.scope === undefined)).toBe(true);
+  });
+
+  it.each([
+    "if (int value = g(a)) use(value);",
+    "if (int value{g(a)}) use(value);",
+    "while (int value = g(a)) use(value);",
+    "switch (int value = g(a)) { default: use(value); }",
+    "for (int value(0); value < 3; ++value) use(value);",
+    "for (int value = 0; value < 3; ++value) use(value);",
+    "for (auto &value : values) use(value);",
+    "if (int value(1); a && g(a)) use(value);",
+    "switch (int value(1); value) { default: use(value); }",
+    "try { work(); } catch (const Error &value) { use(value); }",
+    "if (int (*value)(int) = pick()) use(value);"
+  ])("preserves a real control-statement declaration: %s", (statement) => {
+    const source = `void run(int a) {\n${statement}\n}`;
+    const indexed = scanCallIndexFile(source);
+    const offset = source.indexOf("value");
+    const declaration = indexed.declarations.find((candidate) => candidate.offset === offset);
+    const uses = indexed.calls.filter((call) => call.callee === "value" && call.offset > offset);
+
+    expect(declaration?.scope).toMatchObject({ kind: "local", declarationOffset: offset });
+    expect(uses.length).toBeGreaterThan(0);
+    for (const call of uses) {
+      expect(call.scope).toEqual(declaration!.scope);
+    }
+    expect(indexed.calls.filter((call) => call.callee === "g").every((call) => call.scope === undefined))
+      .toBe(true);
+  });
+
+  it("restores the implicit member owner after removing a false local declaration", () => {
+    const source = `class C { public: void foo(int x); void run(int x); };
+void C::run(int x) { if (x) foo(x); }
+`;
+    const call = scanCallIndexFile(source).calls.find((candidate) => candidate.callee === "foo");
+
+    expect(call?.scope).toBeUndefined();
+    expect(call?.implicitMemberOwner).toBe("C");
+  });
+
   it("attributes a continued directive to its macro, not to the code after it", () => {
     const source = "#define WRAP(x) \\\n  helper(x)\nint run(void) { return helper(1); }\n";
 
