@@ -67,4 +67,27 @@ describe("TypeLookup", () => {
     types.remove(override);
     expect(types.virtualMembers.size).toBe(0);
   });
+
+  it("reuses the dispatch lookups until the types change", () => {
+    const types = new TypeLookup();
+    const task = contributions({
+      inheritances: [{ derived: "VbssTask", base: "Task" }],
+      virtualMembers: [{ owner: "Task", name: "handle_message" }]
+    });
+    types.add(task);
+    const dispatch = types.dispatch;
+    expect(types.dispatch).toBe(dispatch);
+    expect(dispatch.knownOwnersNamed("vbsstask")).toEqual(["VbssTask"]);
+    expect(dispatch.virtualOwnersOf("handle_message")).toEqual(["Task"]);
+
+    types.remove(task);
+    expect(types.dispatch).not.toBe(dispatch);
+    expect(types.dispatch.knownOwners.size).toBe(0);
+    expect(types.dispatch.virtualOwnersOf("handle_message")).toEqual([]);
+
+    types.add(task);
+    expect(types.dispatch.knownOwners).toEqual(new Set(["VbssTask", "Task"]));
+    types.clear();
+    expect(types.dispatch.knownOwners.size).toBe(0);
+  });
 });

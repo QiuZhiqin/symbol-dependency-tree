@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   definitionOwnerMatchesTarget,
+  VirtualDispatchIndex,
   virtualMemberKey,
   virtualMemberOwnersMatch
 } from "../../src/utils/virtualDispatch";
@@ -14,6 +15,7 @@ describe("virtual dispatch", () => {
     ["UnrelatedTask", new Set(["OtherBase"])]
   ]);
   const virtualMembers = new Set([virtualMemberKey("Task", "handle_message")]);
+  const dispatch = new VirtualDispatchIndex(baseTypes, virtualMembers);
 
   it("matches a base-typed virtual call to direct and transitive overrides", () => {
     expect(
@@ -21,8 +23,7 @@ describe("virtual dispatch", () => {
         "AssociationTask",
         "Task",
         "handle_message",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(true);
     expect(
@@ -30,8 +31,7 @@ describe("virtual dispatch", () => {
         "SpecialAssociationTask",
         "Task",
         "handle_message",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(true);
   });
@@ -42,8 +42,7 @@ describe("virtual dispatch", () => {
         "UnrelatedTask",
         "Task",
         "handle_message",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(false);
     expect(
@@ -51,8 +50,7 @@ describe("virtual dispatch", () => {
         "AssociationTask",
         "Task",
         "ordinary_method",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(false);
   });
@@ -65,8 +63,7 @@ describe("virtual dispatch", () => {
           "VbssTask",
           receiver,
           "handle_message",
-          baseTypes,
-          virtualMembers
+          dispatch
         )
       ).toBe(true);
     }
@@ -78,8 +75,7 @@ describe("virtual dispatch", () => {
         "VbssTask",
         "task",
         "handle_message",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(true);
   });
@@ -90,8 +86,7 @@ describe("virtual dispatch", () => {
         "SpecialAssociationTask",
         "selected_handler",
         "handle_message",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(true);
   });
@@ -106,8 +101,7 @@ describe("virtual dispatch", () => {
         "VbssTask",
         "handler",
         "handle_message",
-        baseTypes,
-        ambiguousVirtualMembers
+        new VirtualDispatchIndex(baseTypes, ambiguousVirtualMembers)
       )
     ).toBe(false);
   });
@@ -118,8 +112,7 @@ describe("virtual dispatch", () => {
         "VbssTask",
         "handler",
         "ordinary_method",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(false);
   });
@@ -130,8 +123,7 @@ describe("virtual dispatch", () => {
         "vbss_operations_t",
         undefined,
         "vbss_if_get_sta_assoc",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(false);
   });
@@ -142,8 +134,7 @@ describe("virtual dispatch", () => {
         "vbss_operations_t",
         "vbss_operations_t",
         "vbss_if_get_sta_assoc",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(true);
     expect(
@@ -151,8 +142,7 @@ describe("virtual dispatch", () => {
         "SpecialAssociationTask",
         "AssociationTask",
         "handle_message",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(true);
   });
@@ -163,8 +153,7 @@ describe("virtual dispatch", () => {
         undefined,
         undefined,
         "vbss_if_get_sta_assoc",
-        baseTypes,
-        virtualMembers
+        dispatch
       )
     ).toBe(true);
   });

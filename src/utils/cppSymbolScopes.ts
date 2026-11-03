@@ -1,4 +1,10 @@
 import type { CppFunctionDefinition } from "./cppFunctionScanner";
+import {
+  dotCallPathMember,
+  smartPointerFactories,
+  smartPointerTemplates,
+  smartPointerType
+} from "./smartPointers";
 import { blankPreservingLineBreaks, maskCppCommentsAndLiterals } from "./textScanner";
 
 export type IndexedSymbolScope =
@@ -493,7 +499,83 @@ function typeNameBefore(tokens: readonly Token[], nameIndex: number): string | u
     ) {
       continue;
     }
-    return normalizedOwner(token.text);
+    return smartPointerTemplateAt(tokens, index, smartPointerTemplates)?.type ??
+      normalizedOwner(token.text);
+  }
+  return undefined;
+}
+
+/**
+ * `smart_ptr<T>` for `shared_ptr<T>`, `make_shared<T>` and the like at
+ * `index`, with the index of the `>` closing the template. `T` is the last
+ * name of the first template argument, so `const ns::T` is `T`.
+ */
+function smartPointerTemplateAt(
+  tokens: readonly Token[],
+  index: number,
+  names: ReadonlySet<string>
+): { readonly type: string; readonly close: number } | undefined {
+  if (!names.has(tokens[index]?.text ?? "") || tokens[index + 1]?.text !== "<") {
+    return undefined;
+  }
+  let depth = 0;
+  let firstArgument = true;
+  let pointee: string | undefined;
+  for (let current = index + 2; current < tokens.length; current += 1) {
+    const text = tokens[current]!.text;
+    if (text === "<") {
+      depth += 1;
+    } else if (text === ">" || text === ">>") {
+      depth -= text.length;
+      if (depth < 0) {
+        return pointee === undefined
+          ? undefined
+          : { type: smartPointerType(pointee), close: current };
+      }
+    } else if (depth === 0 && text === ",") {
+      firstArgument = false;
+    } else if (
+      depth === 0 &&
+      firstArgument &&
+      isIdentifier(tokens[current]) &&
+      !declarationQualifiers.has(text) &&
+      !typeIntroducers.has(text)
+    ) {
+      pointee = text;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * `auto p = std::make_shared<T>(...)` and similar initializers. The factory
+ * call must be the whole initializer: `make_shared<T>()->child()` is not a `T`.
+ */
+function smartPointerInitializerType(
+  tokens: readonly Token[],
+  declaratorIndex: number
+): string | undefined {
+  if (tokens[declaratorIndex + 1]?.text !== "=") {
+    return undefined;
+  }
+  const first = declaratorIndex + 2;
+  const callee =
+    tokens[first]?.text === "std" && tokens[first + 1]?.text === "::" ? first + 2 : first;
+  const template = smartPointerTemplateAt(tokens, callee, smartPointerFactories);
+  if (template === undefined || tokens[template.close + 1]?.text !== "(") {
+    return undefined;
+  }
+  let depth = 0;
+  for (let current = template.close + 1; current < tokens.length; current += 1) {
+    const text = tokens[current]!.text;
+    if (text === "(") {
+      depth += 1;
+    } else if (text === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return current === tokens.length - 1 ? template.type : undefined;
+      }
+    }
   }
   return undefined;
 }
@@ -601,8 +683,12 @@ function inferredAutoOwnerPath(
     if ((operator !== "." && operator !== "->") || !isIdentifier(member)) {
       break;
     }
-    members.push(member.text);
     index += 2;
+    members.push(
+      operator === "." && tokens[index]?.text === "("
+        ? dotCallPathMember(member.text)
+        : member.text
+    );
     if (tokens[index]?.text !== "(") {
       continue;
     }
@@ -740,13 +826,17 @@ function parseDeclarationSegment(rawTokens: readonly Token[]): ParsedDeclaration
 
   const declarator = tokens[declaratorIndex]!;
   let typeName = typeNameBefore(tokens, declaratorIndex);
-  const ownerPath = tokens
+  const isAuto = tokens
     .slice(0, declaratorIndex)
-    .some((token) => token.text === "auto")
+    .some((token) => token.text === "auto");
+  const ownerPath = isAuto
     ? inferredAutoOwnerPath(tokens, declaratorIndex)
     : undefined;
   if (typeName === "auto") {
     typeName = inferredAutoType(tokens, declaratorIndex) ?? typeName;
+  }
+  if (isAuto && typeName === undefined && ownerPath === undefined) {
+    typeName = smartPointerInitializerType(tokens, declaratorIndex);
   }
   const declarations: ParsedDeclaration[] = [
     {
@@ -1282,6 +1372,59 @@ function visibleLocal(
     .sort((left, right) => right.offset - left.offset)[0];
 }
 
+/**
+ * Resolves the head of an `auto x = head.member()` path as a receiver at the
+ * declaration: `this`, a typed local or another such `auto` local, or else a
+ * member of the enclosing class or namespace (`auto p = m_task.lock()` in
+ * `C::f` becomes `C.m_task.lock`). A file-scope object stays a name for the
+ * query to look up across files.
+ */
+function rootedOwnerPath(
+  local: LocalDeclaration,
+  declarations: readonly LocalDeclaration[],
+  parents: ReadonlyMap<number, number | undefined>,
+  globalTypes: ReadonlyMap<string, string | undefined>,
+  methodOwner: string | undefined,
+  depth: number
+): IndexedMemberOwnerPath {
+  const path = local.ownerPath!;
+  const head = path.rootOwner;
+  if (head === "this") {
+    return methodOwner === undefined
+      ? path
+      : { rootOwner: methodOwner, members: path.members };
+  }
+  const headLocal = visibleLocal(
+    head,
+    local.offset - 1,
+    local.scopeStart,
+    declarations,
+    parents
+  );
+  if (headLocal?.ownerPath !== undefined && depth < 8) {
+    const parent = rootedOwnerPath(
+      headLocal,
+      declarations,
+      parents,
+      globalTypes,
+      methodOwner,
+      depth + 1
+    );
+    return {
+      rootOwner: parent.rootOwner,
+      members: [...parent.members, ...path.members]
+    };
+  }
+  if (headLocal !== undefined) {
+    return headLocal.typeName === undefined
+      ? path
+      : { rootOwner: headLocal.typeName, members: path.members };
+  }
+  return globalTypes.has(head) || methodOwner === undefined
+    ? path
+    : { rootOwner: methodOwner, members: [head, ...path.members] };
+}
+
 function ownerPathForReceiver(
   tokens: readonly Token[],
   receiverIndex: number,
@@ -1328,7 +1471,14 @@ function ownerPathForReceiver(
     parents
   );
   if (local?.ownerPath !== undefined) {
-    return local.ownerPath;
+    return rootedOwnerPath(
+      local,
+      declarations,
+      parents,
+      globalTypes,
+      methodOwner,
+      0
+    );
   }
   const declaredOwner =
     local?.typeName ??

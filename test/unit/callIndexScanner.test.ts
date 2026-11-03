@@ -701,6 +701,49 @@ void Controller::receive()
     });
   });
 
+  it("records smart pointer pointees and roots auto paths at the enclosing class", () => {
+    const source = `
+class Controller {
+  void report();
+  std::weak_ptr<vbss_task> m_vbss_task;
+  std::unique_ptr<const ns::vbss_task, deleter> m_unique;
+  std::vector<std::shared_ptr<vbss_task> > m_tasks;
+};
+
+void Controller::report()
+{
+  auto task = m_vbss_task.lock();
+  task->handle_sta_rssi_report();
+  auto made = std::make_shared<vbss_task>();
+  made->handle_sta_rssi_report();
+}
+`;
+    const indexed = scanCallIndexFile(source);
+    const memberType = (name: string): string | undefined =>
+      indexed.declarations.find(
+        (declaration) =>
+          declaration.scope.kind === "member" &&
+          declaration.scope.owner === "Controller" &&
+          declaration.name === name
+      )?.typeName;
+    const calls = indexed.calls.filter(
+      (call) => call.callee === "handle_sta_rssi_report"
+    );
+
+    expect(memberType("m_vbss_task")).toBe("smart_ptr<vbss_task>");
+    expect(memberType("m_unique")).toBe("smart_ptr<vbss_task>");
+    expect(memberType("m_tasks")).toBe("vector");
+    expect(calls).toHaveLength(2);
+    // `.lock` keeps its `.` so the query can tell it from a pointee's `->lock()`.
+    expect(calls[0]).toMatchObject({
+      scope: { kind: "member", owner: ".lock" },
+      memberOwnerPath: { rootOwner: "Controller", members: ["m_vbss_task", ".lock"] }
+    });
+    expect(calls[1]).toMatchObject({
+      scope: { kind: "member", owner: "smart_ptr<vbss_task>" }
+    });
+  });
+
   it("preserves an unqualified member path when its type is declared in another file", () => {
     const source = `
 void Controller::receive()

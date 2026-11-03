@@ -22,10 +22,12 @@ import {
   normalizeExtension
 } from "../utils/exclusions";
 import { countArgumentsAfterName } from "../utils/arityMatcher";
+import { calledMemberOwner, memberTypeOf } from "../utils/smartPointers";
 import { shortSymbolName } from "../utils/symbolNames";
 import {
   definitionOwnerMatchesTarget,
-  virtualMemberOwnersMatch
+  virtualMemberOwnersMatch,
+  type VirtualDispatchIndex
 } from "../utils/virtualDispatch";
 import {
   openCallIndexDatabase,
@@ -188,8 +190,7 @@ function callMatchesScope(
   memberName: string,
   memberTypes: ReadonlyMap<string, string | undefined>,
   objectTypes: ReadonlyMap<string, string | undefined>,
-  baseTypes: ReadonlyMap<string, ReadonlySet<string>>,
-  virtualMembers: ReadonlySet<string>
+  dispatch: VirtualDispatchIndex
 ): boolean {
   if (targetScope?.kind === "local") {
     return (
@@ -204,61 +205,64 @@ function callMatchesScope(
     const targetOwner = resolveMemberOwner(
       targetScope,
       targetMemberOwnerPath,
+      memberName,
       memberTypes,
       objectTypes
     );
     const candidateOwner = resolveMemberOwner(
       candidate.call.scope,
       candidate.call.memberOwnerPath,
+      memberName,
       memberTypes,
       objectTypes
     );
     const explicitMatch =
       targetOwner !== undefined &&
       candidateOwner !== undefined &&
-      virtualMemberOwnersMatch(
-        targetOwner,
-        candidateOwner,
-        memberName,
-        baseTypes,
-        virtualMembers
-      );
+      virtualMemberOwnersMatch(targetOwner, candidateOwner, memberName, dispatch);
     const implicitOwner = candidate.call.implicitMemberOwner;
     const implicitMatch =
       targetOwner !== undefined &&
       implicitOwner !== undefined &&
-      virtualMemberOwnersMatch(
-        targetOwner,
-        implicitOwner,
-        memberName,
-        baseTypes,
-        virtualMembers
-      );
+      virtualMemberOwnersMatch(targetOwner, implicitOwner, memberName, dispatch);
     return explicitMatch || implicitMatch;
   }
   return candidate.call.scope === undefined;
 }
 
+/**
+ * The type whose member `memberName` the reference reaches. The first member
+ * of a path rooted at the enclosing class or namespace may instead be a
+ * file-scope object declared in another file.
+ */
 function resolveMemberOwner(
   scope: IndexedSymbolScope | undefined,
   path: IndexedMemberOwnerPath | undefined,
+  memberName: string,
   memberTypes: ReadonlyMap<string, string | undefined>,
   objectTypes: ReadonlyMap<string, string | undefined>
 ): string | undefined {
-  if (scope?.kind !== "member" || path === undefined) {
-    return scope?.kind === "member"
-      ? objectTypes.get(scope.owner) ?? scope.owner
-      : undefined;
+  if (scope?.kind !== "member") {
+    return undefined;
   }
+  const fallback = (): string =>
+    calledMemberOwner(objectTypes.get(scope.owner) ?? scope.owner, memberName);
+  if (path === undefined) {
+    return fallback();
+  }
+  const memberType = (owner: string, member: string): string | undefined =>
+    memberTypes.get(memberTypeKey(owner, member));
   let owner = objectTypes.get(path.rootOwner) ?? path.rootOwner;
-  for (const member of path.members) {
-    const typeName = memberTypes.get(memberTypeKey(owner, member));
+  for (const [index, member] of path.members.entries()) {
+    const typeName =
+      memberTypeOf(owner, member, memberType) ??
+      (index === 0 ? objectTypes.get(member) : undefined);
     if (typeName === undefined) {
-      return objectTypes.get(scope.owner) ?? scope.owner;
+      return fallback();
     }
     owner = typeName;
   }
-  return owner;
+  return calledMemberOwner(owner, memberName);
 }
 
 export class PersistentCallIndex implements vscode.Disposable {
@@ -423,16 +427,17 @@ export class PersistentCallIndex implements vscode.Disposable {
     if (token.isCancellationRequested) {
       return undefined;
     }
+    const queryName = shortSymbolName(target.name);
     const memberOwner = resolveMemberOwner(
       target.scope,
       target.memberOwnerPath,
+      queryName,
       this.types.memberTypes,
       this.types.objectTypes
     );
     if (memberOwner === undefined) {
       return undefined;
     }
-    const queryName = shortSymbolName(target.name);
     const definitions = this.requireDatabase().definitionsByName(queryName);
     const matching = definitions.filter(
       (candidate) => candidate.definition.memberOwner === memberOwner
@@ -520,6 +525,7 @@ export class PersistentCallIndex implements vscode.Disposable {
         ? resolveMemberOwner(
             effectiveScope,
             target.memberOwnerPath,
+            queryName,
             this.types.memberTypes,
             this.types.objectTypes
           )
@@ -529,8 +535,7 @@ export class PersistentCallIndex implements vscode.Disposable {
         targetMemberOwner,
         definition.memberOwner,
         queryName,
-        this.types.baseTypes,
-        this.types.virtualMembers
+        this.types.dispatch
       );
     const nameDefinitions = database
       .definitionsByName(queryName)
@@ -629,8 +634,7 @@ export class PersistentCallIndex implements vscode.Disposable {
           queryName,
           this.types.memberTypes,
           this.types.objectTypes,
-          this.types.baseTypes,
-          this.types.virtualMembers
+          this.types.dispatch
         )
     );
     const grouped = new Map<string, IndexedCallWithFile[]>();

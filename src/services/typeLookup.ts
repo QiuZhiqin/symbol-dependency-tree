@@ -1,4 +1,4 @@
-import { virtualMemberKey } from "../utils/virtualDispatch";
+import { VirtualDispatchIndex, virtualMemberKey } from "../utils/virtualDispatch";
 import type { FileTypeContributions } from "./callIndexDatabase";
 
 export function memberTypeKey(owner: string, member: string): string {
@@ -45,8 +45,16 @@ export class TypeLookup {
   private readonly objectTypeCounts: ValueCounts = new Map();
   private readonly baseTypeCounts: ValueCounts = new Map();
   private readonly virtualMemberCounts = new Map<string, number>();
+  private dispatchIndex: VirtualDispatchIndex | undefined;
+
+  /** Virtual dispatch lookups over the current types, rebuilt after they change. */
+  public get dispatch(): VirtualDispatchIndex {
+    this.dispatchIndex ??= new VirtualDispatchIndex(this.baseTypes, this.virtualMembers);
+    return this.dispatchIndex;
+  }
 
   public clear(): void {
+    this.dispatchIndex = undefined;
     for (const collection of [
       this.memberTypes,
       this.objectTypes,
@@ -70,6 +78,7 @@ export class TypeLookup {
   }
 
   private apply(contributions: FileTypeContributions, delta: number): void {
+    this.dispatchIndex = undefined;
     for (const memberType of contributions.memberTypes) {
       const key = memberTypeKey(memberType.owner, memberType.member);
       this.setSingleType(

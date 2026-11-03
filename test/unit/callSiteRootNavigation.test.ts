@@ -1044,6 +1044,143 @@ physical_device_init_timer(\\
     expect(macroCallers.scopes.map((scope) => scope.name)).toEqual(["ap_start"]);
   });
 
+  it("finds member callers through smart pointer receivers", async () => {
+    const headerUri = vscode.Uri.parse("file:///e:/sdt-fixture/smart_task.h");
+    const headerText = `#include <memory>
+class vbss_task {
+public:
+    void handle_report(int x);
+    void reset();
+};
+namespace actions {
+class Holder {
+public:
+    std::shared_ptr<vbss_task> task() const;
+    vbss_task *task_ptr() const;
+};
+}
+class Controller {
+public:
+    void weak_lock(); void const_lock(); void shared_member();
+    void shared_copy(); void unique_member(); void factory(); void raw_member();
+    void smart_reset();
+private:
+    std::weak_ptr<vbss_task> m_vbss_task;
+    std::shared_ptr<vbss_task> m_shared;
+    std::unique_ptr<const vbss_task> m_unique;
+    vbss_task *m_raw;
+};
+`;
+    const globalsUri = vscode.Uri.parse("file:///e:/sdt-fixture/smart_globals.cpp");
+    const globalsText = "#include \"smart_task.h\"\nnamespace actions {\nHolder g_holder;\n}\n";
+    const sourceUri = vscode.Uri.parse("file:///e:/sdt-fixture/smart_task.cpp");
+    const sourceText = `#include "smart_task.h"
+void vbss_task::handle_report(int x) { (void)x; }
+void vbss_task::reset() {}
+void Controller::weak_lock() { auto task = m_vbss_task.lock(); if (task) { task->handle_report(1); } }
+void Controller::const_lock() { const auto task = m_vbss_task.lock(); task->handle_report(2); }
+void Controller::shared_member() { m_shared->handle_report(4); }
+void Controller::shared_copy() { std::shared_ptr<vbss_task> task = m_shared; task->handle_report(5); }
+void Controller::unique_member() { m_unique->handle_report(6); }
+void Controller::factory() { auto task = std::make_shared<vbss_task>(); task->handle_report(7); }
+void Controller::raw_member() { m_raw->handle_report(8); }
+void Controller::smart_reset() { m_shared.reset(); }
+namespace actions {
+void use_holder() {
+    auto raw = g_holder.task_ptr();
+    raw->handle_report(9);
+    auto task = g_holder.task();
+    task->handle_report(10);
+}
+}
+`;
+    const files = [[headerUri, headerText], [globalsUri, globalsText], [sourceUri, sourceText]] as const;
+    for (const [uri, text] of files) {
+      fixtures.documents.set(uri.toString(), fixtures.makeDocument(uri, text));
+    }
+    const fixtureUris = await vscode.workspace.findFiles("", "");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([...fixtureUris, headerUri, globalsUri, sourceUri]);
+    const index = await buildIndex();
+    const resolver = new ReferenceResolver(index, new QueryCache());
+    const document = fixtures.documents.get(sourceUri.toString())!;
+    const resolve = async (anchor: string) => {
+      const target = await new SymbolResolver().resolveAt(
+        sourceUri as unknown as vscode.Uri,
+        document.positionAt(sourceText.indexOf(anchor)) as unknown as vscode.Position,
+        token
+      );
+      return resolver.resolve(target!, token);
+    };
+
+    const callers = await resolve("handle_report(int x)");
+    expect(callers.scopes.map((scope) => scope.name).sort()).toEqual([
+      "const_lock",
+      "factory",
+      "raw_member",
+      "shared_copy",
+      "shared_member",
+      "unique_member",
+      "use_holder",
+      "weak_lock"
+    ]);
+    expect(callers.scopes.find((scope) => scope.name === "use_holder")!.references).toHaveLength(2);
+
+    // From a call site, the receiver chain binds the definition in the source file.
+    const fromCallSite = await resolve("handle_report(1)");
+    expect(fromCallSite.definition?.uri.toString()).toBe(sourceUri.toString());
+    expect(fromCallSite.definition?.range.start.line).toBe(
+      document.positionAt(sourceText.indexOf("handle_report(int x)")).line
+    );
+
+    const resetCallers = await resolve("reset() {}");
+    expect(resetCallers.scopes).toEqual([]);
+  });
+
+  it("keeps the pointee's ->get() and chained factory results apart from smart pointer accessors", async () => {
+    // Codex's review fixture, plus `.get()` and `.lock()` on the smart pointer itself.
+    const uri = vscode.Uri.parse("file:///e:/sdt-fixture/smart_accessors.cpp");
+    const text = `#include <memory>
+class Child {
+public:
+    void run();
+};
+class Holder {
+public:
+    Child *get();
+    Child *child();
+    void run();
+};
+Child global_child;
+void Child::run() {}
+void Holder::run() {}
+Child *Holder::get() { return &global_child; }
+Child *Holder::child() { return &global_child; }
+void arrow_get(std::shared_ptr<Holder> ptr) { auto result = ptr->get(); result->run(); }
+void factory_chain() { auto result = std::make_shared<Holder>()->child(); result->run(); }
+void direct_factory() { auto result = std::make_shared<Holder>(); result->run(); }
+void own_get(std::shared_ptr<Holder> ptr) { auto raw = ptr.get(); raw->run(); }
+void own_lock(std::weak_ptr<Holder> weak) { auto locked = weak.lock(); locked->run(); }
+`;
+    fixtures.documents.set(uri.toString(), fixtures.makeDocument(uri, text));
+    const fixtureUris = await vscode.workspace.findFiles("", "");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([...fixtureUris, uri]);
+    const index = await buildIndex();
+    const resolver = new ReferenceResolver(index, new QueryCache());
+    const document = fixtures.documents.get(uri.toString())!;
+    const callers = async (anchor: string): Promise<string[]> => {
+      const target = await new SymbolResolver().resolveAt(
+        uri as unknown as vscode.Uri,
+        document.positionAt(text.indexOf(anchor)) as unknown as vscode.Position,
+        token
+      );
+      const result = await resolver.resolve(target!, token);
+      return result.scopes.map((scope) => scope.name).sort();
+    };
+
+    expect(await callers("run() {}\nvoid Holder")).toEqual(["arrow_get"]);
+    expect(await callers("run() {}\nChild *Holder")).toEqual(["direct_factory", "own_get", "own_lock"]);
+  });
+
   it("binds a name to its function from every entry point when a macro shares it", async () => {
     const index = await buildIndex();
     // Codex's layout: the macro and one caller share a header, the function
