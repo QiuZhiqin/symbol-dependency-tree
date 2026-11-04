@@ -363,8 +363,9 @@ static command_handler UniCmdBssInfoTab[] = {
   return module;
 });
 
-import { readdirSync } from "node:fs";
+import { readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import * as vscode from "vscode";
 import {
   CallIndexDatabase,
@@ -376,6 +377,8 @@ import { PersistentCallIndex } from "../../src/services/persistentCallIndex";
 import { SymbolResolver } from "../../src/services/symbolResolver";
 import { TypeLookup } from "../../src/services/typeLookup";
 import type { IndexedFileRecord } from "../../src/model/persistentIndexTypes";
+import type { TargetSymbol } from "../../src/model/symbolTypes";
+import { trackRange, type TrackedEdit } from "../../src/utils/positionTracking";
 import { createTempStorage, type TempStorage } from "./helpers/tempStorage";
 
 const token = { isCancellationRequested: false } as vscode.CancellationToken;
@@ -764,16 +767,18 @@ void ${name}() { consume(global_context); }
   });
 
   it("preserves a function-local callback table scope after reopening the database", async () => {
-    const initial = await buildIndex();
+    const initialMessages: string[] = [];
+    const initial = await buildIndex(initialMessages);
     initial.dispose();
+    expect(initialMessages).toContainEqual(expect.stringMatching(
+      /^Persistent call index ready: .* calls in \d+ ms \(list \d+ ms, stat\/read\/scan \d+ ms, write \d+ ms, commit \d+ ms, publish \d+ ms\)$/u
+    ));
 
     const outputMessages: string[] = [];
     const index = await buildIndex(outputMessages);
-    expect(
-      outputMessages.some((message) =>
-        message.includes("Persistent call index loaded from")
-      )
-    ).toBe(true);
+    expect(outputMessages).toContainEqual(
+      expect.stringMatching(/^Persistent call index loaded from .* calls in \d+ ms$/u)
+    );
 
     const document = fixtures.documents.get(fixtures.autoReceiverUri.toString())!;
     const definitionOffset = fixtures.autoReceiverText.indexOf(
@@ -1242,5 +1247,149 @@ describe("root definitions that moved", () => {
 
     expect(result.definition?.range.start.line).toBe(2);
     expect(result.scopes.map((scope) => scope.name)).toEqual(["moved_user"]);
+  });
+});
+
+describe("local references", () => {
+  const uri = vscode.Uri.parse("file:///e:/sdt-fixture/locals.c");
+  const text = `int first(int value) {
+  int total = value;
+  return total + value;
+}
+int second(int value) {
+  return value;
+}
+`;
+
+  async function indexWithLocals(): Promise<PersistentCallIndex> {
+    fixtures.documents.set(uri.toString(), fixtures.makeDocument(uri, text));
+    const fixtureUris = await vscode.workspace.findFiles("", "");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([...fixtureUris, uri]);
+    return buildIndex();
+  }
+
+  async function localAt(anchor: string, nth = 0): Promise<TargetSymbol> {
+    let offset = -1;
+    for (let found = 0; found <= nth; found += 1) {
+      offset = text.indexOf(anchor, offset + 1);
+    }
+    const target = await new SymbolResolver().resolveAt(
+      uri,
+      fixtures.makeDocument(uri, text).positionAt(offset),
+      token
+    );
+    expect(target?.scope?.kind).toBe("local");
+    return target!;
+  }
+
+  /** Each caller with the lines of its references, as the tree shows them. */
+  async function referenceLines(index: PersistentCallIndex, target: TargetSymbol): Promise<string[]> {
+    const result = await new ReferenceResolver(index, new QueryCache()).resolve(target, token);
+    return result.scopes.map((scope) =>
+      `${scope.name}:${scope.references.map((reference) => reference.range.start.line).join(",")}`
+    );
+  }
+
+  /** The target as the graph view keeps it after the edit. */
+  function tracked(target: TargetSymbol, edits: readonly TrackedEdit[]): TargetSymbol {
+    const selectionRange = trackRange(target.selectionRange, edits)!;
+    return {
+      ...target,
+      range: trackRange(target.range, edits)!,
+      selectionRange,
+      definition: new vscode.Location(target.uri, selectionRange)
+    };
+  }
+
+  function insertion(line: number, inserted: string): TrackedEdit[] {
+    const at = new vscode.Position(line, 0);
+    return [{ range: new vscode.Range(at, at), text: inserted }];
+  }
+
+  it("leaves local references out of the database and scans them from the document", async () => {
+    const index = await indexWithLocals();
+    const database = (index as unknown as MutableIndex).database;
+    expect(database.callsByCallee("value")).toEqual([]);
+    expect(database.callsByCallee("total")).toEqual([]);
+
+    expect(await referenceLines(index, await localAt("value"))).toEqual(["first:0,1,2"]);
+    expect(await referenceLines(index, await localAt("total"))).toEqual(["first:1,2"]);
+    expect(await referenceLines(index, await localAt("value", 3))).toEqual(["second:4,5"]);
+  });
+
+  it("follows a tracked local target through edits the index has not seen yet", async () => {
+    const index = await indexWithLocals();
+    const parameter = await localAt("value");
+    const local = await localAt("total");
+
+    const above = insertion(0, "// one\n// two\n");
+    fixtures.documents.set(uri.toString(), fixtures.makeDocument(uri, `// one\n// two\n${text}`));
+    expect(await referenceLines(index, tracked(parameter, above))).toEqual(["first:2,3,4"]);
+    expect(await referenceLines(index, parameter)).toEqual([]);
+
+    const inside = insertion(1, "  int pad = 0;\n");
+    fixtures.documents.set(
+      uri.toString(),
+      fixtures.makeDocument(uri, text.replace("  int total", "  int pad = 0;\n  int total"))
+    );
+    expect(await referenceLines(index, tracked(local, inside))).toEqual(["first:2,3"]);
+    expect(await referenceLines(index, local)).toEqual([]);
+  });
+
+  it("binds a local that the scanner also records as a member of the returned struct", async () => {
+    const structUri = vscode.Uri.parse("file:///e:/sdt-fixture/returns_struct.c");
+    const structText = `static struct dump_data *build(void)
+{
+\tunsigned char *buf;
+
+\tbuf = 0;
+\treturn (struct dump_data *)buf;
+}
+`;
+    fixtures.documents.set(structUri.toString(), fixtures.makeDocument(structUri, structText));
+    const fixtureUris = await vscode.workspace.findFiles("", "");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([...fixtureUris, structUri]);
+    const index = await buildIndex();
+    const target = await new SymbolResolver().resolveAt(
+      structUri,
+      fixtures.makeDocument(structUri, structText).positionAt(structText.indexOf("buf")),
+      token
+    );
+    expect(target?.scope?.kind).toBe("local");
+
+    expect(await referenceLines(index, target!)).toEqual(["build:2,4,5"]);
+  });
+
+  it("finds no local references in a file the index left out", async () => {
+    fixtures.documents.set(uri.toString(), fixtures.makeDocument(uri, text));
+    const index = await buildIndex();
+
+    expect(await referenceLines(index, await localAt("value"))).toEqual([]);
+  });
+});
+
+describe("files on the local disk", () => {
+  it("reads them without VS Code's file service and keeps them when reopening", async () => {
+    const file = path.join(storage.directory, "on_disk.c");
+    writeFileSync(file, "int on_disk_fn(void) { return 0; }\nint on_disk_user(void) { return on_disk_fn(); }\n");
+    // A fractional millisecond tells VS Code's rounded mtime from a truncated one.
+    utimesSync(file, 1_700_000_000, 1_700_000_000.1237);
+    const href = pathToFileURL(file).href;
+    const uri = { scheme: "file", fsPath: file, path: new URL(href).pathname, toString: () => href };
+    const fixtureUris = await vscode.workspace.findFiles("", "");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([...fixtureUris, uri as unknown as vscode.Uri]);
+    const stat = vi.spyOn(vscode.workspace.fs, "stat");
+    const read = vi.spyOn(vscode.workspace.fs, "readFile");
+
+    const index = await buildIndex();
+    const database = (index as unknown as MutableIndex).database;
+    expect(database.callsByCallee("on_disk_fn").map((call) => call.caller.name)).toEqual(["on_disk_user"]);
+    expect(database.fileStates().get(href)?.mtime).toBe(statSync(file).mtime.getTime());
+    expect([...stat.mock.calls, ...read.mock.calls].map(([called]) => called.toString())).not.toContain(href);
+    index.dispose();
+
+    const replace = vi.spyOn(CallIndexDatabase.prototype, "replaceFile");
+    await buildIndex();
+    expect(replace).not.toHaveBeenCalled();
   });
 });

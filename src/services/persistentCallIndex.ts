@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import {
@@ -7,10 +8,11 @@ import {
   type ScopeReference,
   type TargetSymbol
 } from "../model/symbolTypes";
-import type { IndexedFileRecord } from "../model/persistentIndexTypes";
+import type { IndexedFileRecord, StoredCallSite } from "../model/persistentIndexTypes";
 import {
   scanCallIndexFile,
-  type IndexedFunctionDefinition
+  type IndexedFunctionDefinition,
+  type ScannedCallIndexFile
 } from "../utils/callIndexScanner";
 import type {
   IndexedMemberOwnerPath,
@@ -55,6 +57,19 @@ interface PendingPublication {
   readonly reset: boolean;
   readonly removed: FileTypeContributions[];
   readonly states: Map<string, StoredFileState | undefined>;
+}
+
+/** Wall-clock milliseconds spent in each stage of one index update, for the output log. */
+interface StageTimings {
+  list: number;
+  prepare: number;
+  write: number;
+  commit: number;
+  publish: number;
+}
+
+function newStageTimings(): StageTimings {
+  return { list: 0, prepare: 0, write: 0, commit: 0, publish: 0 };
 }
 
 /** What one file needs in the write transaction, decided before anything is written. */
@@ -143,6 +158,28 @@ function maxIndexedFileBytes(): number {
   return megabytes > 0 ? megabytes * bytesPerMegabyte : Number.POSITIVE_INFINITY;
 }
 
+/**
+ * Local files are read with Node directly: VS Code's file service costs a
+ * round trip per file, about 7 s just to check 9,000 unchanged files when a
+ * workspace reopens.
+ */
+async function statFile(uri: vscode.Uri): Promise<StoredFileState> {
+  if (uri.scheme !== "file") {
+    const stat = await vscode.workspace.fs.stat(uri);
+    return { mtime: stat.mtime, size: stat.size };
+  }
+  const stat = await fs.stat(uri.fsPath);
+  // VS Code's file service reports this same rounded value, so files it
+  // recorded are not seen as changed.
+  return { mtime: stat.mtime.getTime(), size: stat.size };
+}
+
+async function readFileText(uri: vscode.Uri): Promise<string> {
+  const bytes =
+    uri.scheme === "file" ? await fs.readFile(uri.fsPath) : await vscode.workspace.fs.readFile(uri);
+  return Buffer.from(bytes).toString("utf8");
+}
+
 function configurationGlobs(): { include: string; exclude: string } {
   const extensions = configuredExtensions();
   const filesExclude = vscode.workspace
@@ -182,25 +219,80 @@ function callableKind(kind: vscode.SymbolKind): boolean {
   );
 }
 
+/**
+ * The scanner's references, each tied to the index of its caller definition.
+ * Two definitions found at one name position (gmock's template template
+ * parameter `template <class> class MatcherImpl` is read as a class twice)
+ * share a caller index, so the same reference is kept once.
+ */
+function storedCallSites(scanned: ScannedCallIndexFile): StoredCallSite[] {
+  const callerIndexes = new Map(
+    scanned.definitions.map((definition, index) => [definition.selectionStart, index])
+  );
+  const storedCalls = new Set<string>();
+  return scanned.calls.flatMap((call) => {
+    const callerIndex = callerIndexes.get(call.callerSelectionStart);
+    const key = `${call.callee}\u0000${callerIndex}\u0000${call.offset}`;
+    if (callerIndex === undefined || storedCalls.has(key)) {
+      return [];
+    }
+    storedCalls.add(key);
+    return [{
+      callee: call.callee,
+      offset: call.offset,
+      kind: call.kind,
+      scope: call.scope,
+      memberOwnerPath: call.memberOwnerPath,
+      implicitMemberOwner: call.implicitMemberOwner,
+      callerIndex
+    }];
+  });
+}
+
+/**
+ * References to the local symbol declared at `position`, read from the
+ * document as it is now. The index leaves local references out: their scope
+ * is identified by offsets that any edit above them moves.
+ */
+function currentLocalCalls(
+  document: vscode.TextDocument,
+  uri: string,
+  name: string,
+  position: vscode.Position
+): IndexedCallWithFile[] {
+  const scanned = scanCallIndexFile(document.getText());
+  const offset = document.offsetAt(position);
+  // As SymbolResolver binds it: the reference at the declaration first. The
+  // scanner can also record a local as a member there (a function returning
+  // `struct T *` makes its locals look like members of T).
+  const scope =
+    scanned.calls.find((call) => call.callee === name && call.offset === offset)?.scope ??
+    scanned.declarations.find(
+      (declaration) =>
+        declaration.name === name && declaration.offset === offset && declaration.scope.kind === "local"
+    )?.scope;
+  if (scope?.kind !== "local") {
+    return [];
+  }
+  const file = { uri };
+  return storedCallSites(scanned).flatMap((call) =>
+    call.scope?.kind === "local" &&
+    call.scope.functionSelectionStart === scope.functionSelectionStart &&
+    call.scope.declarationOffset === scope.declarationOffset
+      ? [{ file, call, caller: scanned.definitions[call.callerIndex]! }]
+      : []
+  );
+}
+
 function callMatchesScope(
   targetScope: IndexedSymbolScope | undefined,
   targetMemberOwnerPath: IndexedMemberOwnerPath | undefined,
-  canonicalUri: vscode.Uri,
   candidate: IndexedCallWithFile,
   memberName: string,
   memberTypes: ReadonlyMap<string, string | undefined>,
   objectTypes: ReadonlyMap<string, string | undefined>,
   dispatch: VirtualDispatchIndex
 ): boolean {
-  if (targetScope?.kind === "local") {
-    return (
-      candidate.file.uri === canonicalUri.toString() &&
-      candidate.call.scope?.kind === "local" &&
-      candidate.call.scope.functionSelectionStart ===
-        targetScope.functionSelectionStart &&
-      candidate.call.scope.declarationOffset === targetScope.declarationOffset
-    );
-  }
   if (targetScope?.kind === "member") {
     const targetOwner = resolveMemberOwner(
       targetScope,
@@ -616,27 +708,28 @@ export class PersistentCallIndex implements vscode.Disposable {
         )
       );
     }
-    const candidates = database
-      .callsByCallee(queryName, {
-        callableOnly: functionTarget,
-        fileUri: staticTarget
-          ? targetDefinition.file.uri
-          : effectiveScope?.kind === "local"
-            ? canonicalUri.toString()
-            : undefined
-      })
-      .filter((candidate) =>
-        callMatchesScope(
-          effectiveScope,
-          target.memberOwnerPath,
-          canonicalUri,
-          candidate,
-          queryName,
-          this.types.memberTypes,
-          this.types.objectTypes,
-          this.types.dispatch
-        )
-    );
+    // A file the index leaves out (too large, excluded) gets no local references either.
+    const candidates =
+      effectiveScope?.kind === "local"
+        ? targetDocument === undefined
+          ? []
+          : currentLocalCalls(targetDocument, canonicalUri.toString(), queryName, canonicalPosition)
+        : database
+            .callsByCallee(queryName, {
+              callableOnly: functionTarget,
+              fileUri: staticTarget ? targetDefinition.file.uri : undefined
+            })
+            .filter((candidate) =>
+              callMatchesScope(
+                effectiveScope,
+                target.memberOwnerPath,
+                candidate,
+                queryName,
+                this.types.memberTypes,
+                this.types.objectTypes,
+                this.types.dispatch
+              )
+            );
     const grouped = new Map<string, IndexedCallWithFile[]>();
     for (const candidate of candidates) {
       const key = `${candidate.file.uri}#${candidate.caller.selectionStart}`;
@@ -808,6 +901,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     if (this.loaded) {
       return this.databaseAvailable;
     }
+    const started = Date.now();
     this.setStatus({ phase: "loading", stats: this.stats() });
     const databasePath = this.databasePath();
     const database = await openCallIndexDatabase(databasePath);
@@ -827,7 +921,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     const stats = this.stats();
     this.setStatus({ phase: "ready", stats });
     this.output.appendLine(
-      `Persistent call index loaded from ${databasePath}: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls`
+      `Persistent call index loaded from ${databasePath}: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls in ${Date.now() - started} ms`
     );
     return true;
   }
@@ -896,7 +990,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     skipped: { files: number; bytes: number }
   ): Promise<PreparedFile> {
     const key = uri.toString();
-    const stat = await vscode.workspace.fs.stat(uri);
+    const stat = await statFile(uri);
     if (stat.size > maxIndexedFileBytes()) {
       skipped.files += 1;
       skipped.bytes += stat.size;
@@ -923,11 +1017,14 @@ export class PersistentCallIndex implements vscode.Disposable {
     uris: readonly vscode.Uri[],
     force: boolean,
     publication: PendingPublication,
-    skipped: { files: number; bytes: number }
+    skipped: { files: number; bytes: number },
+    timings: StageTimings = newStageTimings()
   ): Promise<void> {
+    let started = Date.now();
     const settled = await Promise.allSettled(
       uris.map((uri) => this.prepareFile(uri, force, skipped))
     );
+    timings.prepare += Date.now() - started;
     const prepared: PreparedFile[] = [];
     for (const result of settled) {
       if (result.status === "rejected") {
@@ -935,6 +1032,7 @@ export class PersistentCallIndex implements vscode.Disposable {
       }
       prepared.push(result.value);
     }
+    started = Date.now();
     for (const file of prepared) {
       if (file.kind === "remove") {
         this.deleteRecord(database, file.key, publication);
@@ -942,6 +1040,7 @@ export class PersistentCallIndex implements vscode.Disposable {
         this.writeRecord(database, file.record, publication);
       }
     }
+    timings.write += Date.now() - started;
   }
 
   private reportSkippedFiles(skipped: { files: number; bytes: number }): void {
@@ -966,7 +1065,10 @@ export class PersistentCallIndex implements vscode.Disposable {
       totalFiles: 0
     });
     const { include, exclude } = configurationGlobs();
+    const timings = newStageTimings();
+    let stageStarted = Date.now();
     const uris = await vscode.workspace.findFiles(include, exclude, undefined, token);
+    timings.list = Date.now() - stageStarted;
     let processedFiles = 0;
     this.setStatus({
       phase: "building",
@@ -992,6 +1094,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     };
     database.begin();
     try {
+      stageStarted = Date.now();
       if (force) {
         database.clear();
       } else {
@@ -1002,11 +1105,12 @@ export class PersistentCallIndex implements vscode.Disposable {
           }
         }
       }
+      timings.write += Date.now() - stageStarted;
       for (const batch of chunks(uris, updateConcurrency)) {
         if (stopIfCancelled()) {
           return;
         }
-        await this.writeBatch(database, batch, force, publication, skipped);
+        await this.writeBatch(database, batch, force, publication, skipped, timings);
         processedFiles += batch.length;
         this.setStatus({
           phase: "building",
@@ -1021,12 +1125,16 @@ export class PersistentCallIndex implements vscode.Disposable {
       if (force || rootsChanged) {
         database.setRoots(roots);
       }
+      stageStarted = Date.now();
       database.commit();
+      timings.commit = Date.now() - stageStarted;
     } catch (error) {
       database.rollback();
       throw error;
     }
+    stageStarted = Date.now();
     this.publish(database, publication);
+    timings.publish = Date.now() - stageStarted;
     this.persistedRoots = roots;
     const contentChanged = force || publication.states.size > 0;
     this.reportSkippedFiles(skipped);
@@ -1034,25 +1142,15 @@ export class PersistentCallIndex implements vscode.Disposable {
     const stats = this.stats();
     this.setStatus({ phase: "ready", stats });
     this.output.appendLine(
-      `Persistent call index ready: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls in ${Date.now() - started} ms`
+      `Persistent call index ready: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls in ${Date.now() - started} ms (list ${timings.list} ms, stat/read/scan ${timings.prepare} ms, write ${timings.write} ms, commit ${timings.commit} ms, publish ${timings.publish} ms)`
     );
     if (contentChanged) {
       this.changes.fire();
     }
   }
 
-  private async indexFile(
-    uri: vscode.Uri,
-    stat?: vscode.FileStat
-  ): Promise<IndexedFileRecord> {
-    const currentStat = stat ?? (await vscode.workspace.fs.stat(uri));
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    return this.indexSource(
-      uri,
-      Buffer.from(bytes).toString("utf8"),
-      currentStat.mtime,
-      currentStat.size
-    );
+  private async indexFile(uri: vscode.Uri, stat: StoredFileState): Promise<IndexedFileRecord> {
+    return this.indexSource(uri, await readFileText(uri), stat.mtime, stat.size);
   }
 
   private indexSource(
@@ -1062,13 +1160,6 @@ export class PersistentCallIndex implements vscode.Disposable {
     size: number
   ): IndexedFileRecord {
     const scanned = scanCallIndexFile(source);
-    const callerIndexes = new Map(
-      scanned.definitions.map((definition, index) => [definition.selectionStart, index])
-    );
-    // Two definitions found at one name position (gmock's template template
-    // parameter `template <class> class MatcherImpl` is read as a class twice)
-    // share a caller index, so the same reference would be stored twice.
-    const storedCalls = new Set<string>();
     const indexed: IndexedFileRecord = {
       uri: uri.toString(),
       mtime,
@@ -1090,23 +1181,8 @@ export class PersistentCallIndex implements vscode.Disposable {
         typeName: objectType.typeName
       })),
       virtualMembers: scanned.virtualMembers,
-      calls: scanned.calls.flatMap((call) => {
-        const callerIndex = callerIndexes.get(call.callerSelectionStart);
-        const key = `${call.callee}\u0000${callerIndex}\u0000${call.offset}`;
-        if (callerIndex === undefined || storedCalls.has(key)) {
-          return [];
-        }
-        storedCalls.add(key);
-        return [{
-          callee: call.callee,
-          offset: call.offset,
-          kind: call.kind,
-          scope: call.scope,
-          memberOwnerPath: call.memberOwnerPath,
-          implicitMemberOwner: call.implicitMemberOwner,
-          callerIndex
-        }];
-      })
+      // Local references are scanned from the current document at query time.
+      calls: storedCallSites(scanned).filter((call) => call.scope?.kind !== "local")
     };
     return indexed;
   }
@@ -1266,7 +1342,7 @@ export class PersistentCallIndex implements vscode.Disposable {
         return;
       }
       const key = uri.toString();
-      const stat = await vscode.workspace.fs.stat(uri);
+      const stat = await statFile(uri);
       if (stat.size > maxIndexedFileBytes()) {
         if (this.fileStates.has(key)) {
           changes.set(key, undefined);
@@ -1310,7 +1386,7 @@ export class PersistentCallIndex implements vscode.Disposable {
         }
         return;
       }
-      const stat = await vscode.workspace.fs.stat(uri);
+      const stat = await statFile(uri);
       const indexed = this.indexSource(
         uri,
         source,

@@ -6,6 +6,11 @@
 - Find member callers through `std::shared_ptr`, `std::unique_ptr` and `std::weak_ptr` receivers, including `auto p = m_task.lock()`, `std::make_shared<T>()` and `auto` results whose chain starts at a class member or a typed local. `p.reset()` and the smart pointer's other own members are not taken as calls to the pointee.
 - Keep calls in control conditions and unbraced bodies from being mistaken for local declarations, while preserving real condition variables and init-statements. Rebuild existing indexes once to replace the old scope metadata.
 - Keep a root node on its definition while the file is edited: clicking the root name follows lines inserted or deleted above the symbol instead of opening the line it had when the tree was generated.
+- Halve the index database. References to local variables and parameters are no longer stored; they are found by scanning the current file when queried, so they also follow unsaved edits. A per-file list of referenced names replaces the index on file numbers. Existing indexes are rebuilt once after the update, and the old database file shrinks instead of keeping its size. The reference count in the status bar no longer includes local references.
+- Speed up queries for names that many local variables share, such as `i`, `len`, or `data`, and index updates of large files.
+- Check and read local files directly instead of through VS Code's file service, so reopening a large workspace no longer waits several seconds before queries run, and a full rebuild takes about a third less time.
+- Truncate the database's write-ahead log after each update, so a rebuild no longer leaves a log as large as the index on disk until the window closes.
+- Log how long listing, reading and scanning, writing, committing, and publishing took whenever the index becomes ready.
 
 ## 0.11.0
 

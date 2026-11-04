@@ -16,7 +16,7 @@ import type {
 } from "../utils/cppSymbolScopes";
 
 /** Bump when the table layout or stored semantics change; older databases are rebuilt. */
-const schemaVersion = 4;
+const schemaVersion = 5;
 
 const definitionKinds = ["function", "initializer", "type", "macro"] as const;
 const typeKinds = ["class", "enum", "struct", "union"] as const;
@@ -30,6 +30,7 @@ const tables = [
   "files",
   "definitions",
   "calls",
+  "file_callees",
   "member_types",
   "object_types",
   "inheritances",
@@ -39,7 +40,7 @@ const tables = [
 const contentTables = tables.filter((table) => table !== "meta");
 const perFileTables = [
   "definitions",
-  "calls",
+  "file_callees",
   "member_types",
   "object_types",
   "inheritances",
@@ -88,7 +89,11 @@ CREATE TABLE calls(
   implicit_owner INTEGER,
   PRIMARY KEY(callee, file, caller, offset)
 ) WITHOUT ROWID;
-CREATE INDEX calls_file ON calls(file);
+CREATE TABLE file_callees(
+  file INTEGER NOT NULL,
+  callee INTEGER NOT NULL,
+  PRIMARY KEY(file, callee)
+) WITHOUT ROWID;
 CREATE TABLE member_types(file INTEGER NOT NULL, owner INTEGER NOT NULL, member INTEGER NOT NULL, type_name INTEGER NOT NULL);
 CREATE INDEX member_types_file ON member_types(file);
 CREATE TABLE object_types(file INTEGER NOT NULL, name INTEGER NOT NULL, type_name INTEGER NOT NULL);
@@ -137,7 +142,7 @@ export interface IndexedDefinitionWithFile {
 export interface CallFilter {
   /** Keep only callable references (function targets). */
   readonly callableOnly?: boolean;
-  /** Keep only references in this file (static and local targets). */
+  /** Keep only references in this file (static targets). */
   readonly fileUri?: string;
 }
 
@@ -229,6 +234,10 @@ export async function openCallIndexDatabase(filePath: string): Promise<CallIndex
         writer.exec(schema);
         writer.exec(`PRAGMA user_version = ${schemaVersion}`);
         writer.exec("COMMIT");
+        // The dropped tables leave their pages free inside the file; compacting
+        // the still-empty database shrinks the file instead of keeping its old size.
+        writer.exec("VACUUM");
+        writer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
       }
       const reader = connect();
       reader.exec("PRAGMA query_only = ON");
@@ -266,6 +275,7 @@ interface WriteStatements
     | "deleteFile"
     | "insertDefinition"
     | "insertCall"
+    | "insertFileCallee"
     | "insertMemberType"
     | "insertObjectType"
     | "insertInheritance"
@@ -322,15 +332,22 @@ function writeStatements(database: DatabaseSync): WriteStatements {
       "UPDATE files SET mtime = ?, size = ?, functions = ?, calls = ? WHERE id = ?"
     ),
     deleteFile: database.prepare("DELETE FROM files WHERE id = ?"),
-    deleteFileRows: perFileTables.map((table) =>
-      database.prepare(`DELETE FROM ${table} WHERE file = ?`)
-    ),
+    deleteFileRows: [
+      // calls has no index on file, which would take a third of the database:
+      // a file's rows are found through the callees it references, before
+      // file_callees itself is cleared.
+      database.prepare(
+        "DELETE FROM calls WHERE file = ?1 AND callee IN (SELECT callee FROM file_callees WHERE file = ?1)"
+      ),
+      ...perFileTables.map((table) => database.prepare(`DELETE FROM ${table} WHERE file = ?`))
+    ],
     insertDefinition: database.prepare(
       `INSERT INTO definitions(file, idx, ${definitionColumns}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ),
     insertCall: database.prepare(
       "INSERT INTO calls(callee, file, caller, offset, kind, scope_kind, scope_a, scope_b, owner_path, implicit_owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     ),
+    insertFileCallee: database.prepare("INSERT INTO file_callees(file, callee) VALUES (?, ?)"),
     insertMemberType: database.prepare(
       "INSERT INTO member_types(file, owner, member, type_name) VALUES (?, ?, ?, ?)"
     ),
@@ -400,6 +417,10 @@ export class CallIndexDatabase {
     this.writer.exec("COMMIT");
     this.transactionOpen = false;
     this.transactionStringIds.clear();
+    // A checkpoint leaves the write-ahead log at its largest size until the
+    // database closes; one rebuild would keep a log as large as the index.
+    // Queries finish synchronously, so no reader holds the log here.
+    this.writer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
 
   public rollback(): void {
@@ -439,9 +460,12 @@ export class CallIndexDatabase {
     record.definitions.forEach((definition, index) => {
       this.write.insertDefinition.run(fileId, index, ...this.definitionValues(definition));
     });
+    const callees = new Set<number>();
     for (const call of record.calls) {
+      const callee = this.stringId(call.callee);
+      callees.add(callee);
       this.write.insertCall.run(
-        this.stringId(call.callee),
+        callee,
         fileId,
         call.callerIndex,
         call.offset,
@@ -452,6 +476,9 @@ export class CallIndexDatabase {
           : JSON.stringify([call.memberOwnerPath.rootOwner, ...call.memberOwnerPath.members]),
         call.implicitMemberOwner === undefined ? null : this.stringId(call.implicitMemberOwner)
       );
+    }
+    for (const callee of callees) {
+      this.write.insertFileCallee.run(fileId, callee);
     }
     const contributions = recordTypeContributions(record);
     for (const memberType of contributions.memberTypes) {
