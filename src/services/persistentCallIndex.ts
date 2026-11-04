@@ -1088,7 +1088,7 @@ export class PersistentCallIndex implements vscode.Disposable {
       });
       return true;
     };
-    database.begin();
+    database.begin(true);
     try {
       stageStarted = Date.now();
       if (force) {
@@ -1192,7 +1192,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     const skipped = { files: 0, bytes: 0 };
     const roots = workspaceRoots();
     const rootsChanged = !sameValues(this.persistedRoots, roots);
-    database.begin();
+    database.begin(true);
     try {
       stageStarted = Date.now();
       for (const key of this.fileStates.keys()) {

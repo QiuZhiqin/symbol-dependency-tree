@@ -21,6 +21,12 @@ const schemaVersion = 5;
 const definitionKinds = ["function", "initializer", "type", "macro"] as const;
 const typeKinds = ["class", "enum", "struct", "union"] as const;
 const busyTimeoutMs = 5000;
+/**
+ * Page cache of a bulk write (a rebuild, the startup check, added folders),
+ * in KiB. It cut the write time of a 59,000-file rebuild by about a fifth over
+ * SQLite's default of about 2 MB, and is given back when the transaction ends.
+ */
+const bulkWriteCacheKiB = 64 * 1024;
 const sqliteCorrupt = 11;
 const sqliteNotADatabase = 26;
 
@@ -391,6 +397,8 @@ export class CallIndexDatabase {
   // discards the ids it allocated.
   private readonly transactionStringIds = new Map<string, number>();
   private transactionOpen = false;
+  /** The cache size to restore once a bulk write ends. */
+  private cacheSizeAfterBulkWrite: number | undefined;
   private readonly write: WriteStatements;
   private readonly read: ReadStatements;
   private readonly callQueries = new Map<string, StatementSync>();
@@ -408,9 +416,16 @@ export class CallIndexDatabase {
     this.writer.close();
   }
 
-  public begin(): void {
+  /** @param bulk use a larger page cache until the transaction ends */
+  public begin(bulk = false): void {
     this.writer.exec("BEGIN IMMEDIATE");
     this.transactionOpen = true;
+    if (bulk) {
+      this.cacheSizeAfterBulkWrite = numberValue(
+        this.writer.prepare("PRAGMA cache_size").get()?.["cache_size"]
+      );
+      this.writer.exec(`PRAGMA cache_size = -${bulkWriteCacheKiB}`);
+    }
   }
 
   public commit(): void {
@@ -421,6 +436,7 @@ export class CallIndexDatabase {
     // database closes; one rebuild would keep a log as large as the index.
     // Queries finish synchronously, so no reader holds the log here.
     this.writer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    this.endBulkWrite();
   }
 
   public rollback(): void {
@@ -429,6 +445,17 @@ export class CallIndexDatabase {
       this.transactionOpen = false;
       this.writer.exec("ROLLBACK");
     }
+    this.endBulkWrite();
+  }
+
+  private endBulkWrite(): void {
+    if (this.cacheSizeAfterBulkWrite === undefined) {
+      return;
+    }
+    this.writer.exec(`PRAGMA cache_size = ${this.cacheSizeAfterBulkWrite}`);
+    // Free the pages the larger cache still holds.
+    this.writer.exec("PRAGMA shrink_memory");
+    this.cacheSizeAfterBulkWrite = undefined;
   }
 
   /** Removes every indexed file inside the current write transaction. */

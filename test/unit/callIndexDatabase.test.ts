@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { IndexedFileRecord } from "../../src/model/persistentIndexTypes";
 import {
@@ -111,6 +112,23 @@ describe("CallIndexDatabase", () => {
 
     expect(statSync(`${databasePath}-wal`).size).toBe(0);
     expect(files("callee_1999")).toEqual([first]);
+  });
+
+  it("uses a larger page cache only while a bulk write is open", () => {
+    const writer = (database as unknown as { writer: DatabaseSync }).writer;
+    const cacheSize = (): number => Number(writer.prepare("PRAGMA cache_size").get()?.["cache_size"]);
+    const initial = cacheSize();
+
+    database.begin(true);
+    expect(cacheSize()).toBe(-64 * 1024);
+    database.commit();
+    expect(cacheSize()).toBe(initial);
+    database.begin(true);
+    database.rollback();
+    expect(cacheSize()).toBe(initial);
+    database.begin();
+    expect(cacheSize()).toBe(initial);
+    database.rollback();
   });
 
   it("compacts the database file left by an older schema", async () => {

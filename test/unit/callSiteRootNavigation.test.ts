@@ -1424,6 +1424,15 @@ describe("scanning and batches", () => {
     expect(disposed).toBe(true);
   });
 
+  it("writes a rebuild as a bulk transaction", async () => {
+    const index = await buildIndex();
+    const begin = vi.spyOn(CallIndexDatabase.prototype, "begin");
+
+    await index.rebuild(token);
+
+    expect(begin).toHaveBeenCalledWith(true);
+  });
+
   it("reads no file when the rebuild was cancelled before it started", async () => {
     const index = newIndex();
     const stat = vi.spyOn(vscode.workspace.fs, "stat");
