@@ -7,6 +7,9 @@ vi.mock("vscode", () => {
   class Range {
     public constructor(public readonly start: Position, public readonly end: Position) {}
   }
+  class Location {
+    public constructor(public readonly uri: unknown, public readonly range: Range) {}
+  }
   class Uri {
     public constructor(private readonly value: string) {}
     public static file(path: string): Uri { return new Uri(`file://${path}`); }
@@ -24,6 +27,7 @@ vi.mock("vscode", () => {
     public dispose(): void {}
   }
   return {
+    Location,
     Position,
     Range,
     Uri,
@@ -323,5 +327,62 @@ describe("SymbolDependencyGraphViewProvider async ownership", () => {
     } finally {
       provider.dispose();
     }
+  });
+});
+
+describe("SymbolDependencyGraphViewProvider root location", () => {
+  function graphProvider(resolve: ReturnType<typeof vi.fn>): SymbolDependencyGraphViewProvider {
+    return new SymbolDependencyGraphViewProvider(
+      vscode.Uri.file("/extension"),
+      { resolve } as unknown as ReferenceResolver,
+      new QueryCache(),
+      { appendLine: vi.fn() } as unknown as vscode.OutputChannel
+    );
+  }
+
+  function at(line: number): vscode.Range {
+    return new vscode.Range(new vscode.Position(line, 0), new vscode.Position(line, 4));
+  }
+
+  it("moves the root with edits of its file and queries from there", async () => {
+    const resolve = vi.fn().mockResolvedValue({ scopes: [] });
+    const provider = graphProvider(resolve);
+    try {
+      await provider.addRoot(rootTarget(), rootOrigin());
+      const insertTwoLines = [{ range: new vscode.Range(new vscode.Position(0, 0), new vscode.Position(0, 0)), text: "// a\n// b\n" }];
+      provider.trackEdits(vscode.Uri.file("/other.cpp"), insertTwoLines);
+      expect(provider.rootJumpTarget()?.line).toBe(1);
+
+      provider.trackEdits(vscode.Uri.file("/root.cpp"), insertTwoLines);
+      expect(provider.rootJumpTarget()).toEqual({ uri: "file:///root.cpp", line: 3 });
+      await provider.invalidate();
+      const queried = resolve.mock.lastCall?.[0] as TargetSymbol;
+      expect(queried.definition?.range.start.line).toBe(2);
+      expect(queried.selectionRange.start.line).toBe(2);
+    } finally { provider.dispose(); }
+  });
+
+  it("takes the queried definition when the stored one no longer names the root", async () => {
+    const open = vi.mocked(vscode.workspace.openTextDocument);
+    open.mockReset();
+    open.mockResolvedValue({ getText: () => "// b" } as unknown as vscode.TextDocument);
+    const resolve = vi.fn().mockResolvedValue({ scopes: [], definition: { uri: vscode.Uri.file("/root.cpp"), range: at(4) } });
+    const provider = graphProvider(resolve);
+    try {
+      await provider.addRoot(rootTarget(), rootOrigin());
+      expect(provider.rootJumpTarget()).toEqual({ uri: "file:///root.cpp", line: 5 });
+    } finally { provider.dispose(); }
+  });
+
+  it("keeps a stored definition that still names the root", async () => {
+    const open = vi.mocked(vscode.workspace.openTextDocument);
+    open.mockReset();
+    open.mockResolvedValue({ getText: () => "root" } as unknown as vscode.TextDocument);
+    const resolve = vi.fn().mockResolvedValue({ scopes: [], definition: { uri: vscode.Uri.file("/elsewhere.cpp"), range: at(8) } });
+    const provider = graphProvider(resolve);
+    try {
+      await provider.addRoot(rootTarget(), rootOrigin());
+      expect(provider.rootJumpTarget()).toEqual({ uri: "file:///root.cpp", line: 1 });
+    } finally { provider.dispose(); }
   });
 });

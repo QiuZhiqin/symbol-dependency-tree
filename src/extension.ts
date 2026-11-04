@@ -214,6 +214,7 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
   const startupIndexSource = new vscode.CancellationTokenSource();
 
   const documentChanges = vscode.workspace.onDidChangeTextDocument((event) => {
+    graphProvider.trackEdits(event.document.uri, event.contentChanges);
     if (persistentIndex.scheduleDocumentUpdate(event.document)) {
       cache.clear();
     }

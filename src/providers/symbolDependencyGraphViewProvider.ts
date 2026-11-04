@@ -22,7 +22,9 @@ import { extendAncestorPath } from "../utils/cycles";
 import { graphNodeLabel } from "../utils/graphLabels";
 import { layoutVariableWidthGraph } from "../utils/graphLayout";
 import { primaryGraphReference } from "../utils/graphNavigation";
+import { trackRange, type TrackedEdit } from "../utils/positionTracking";
 import { expandReferenceSelection } from "../utils/sourceSelection";
+import { shortSymbolName } from "../utils/symbolNames";
 import { maskCppCommentsAndLiterals } from "../utils/textScanner";
 
 type GraphStatus = GraphStatePayload["status"];
@@ -93,6 +95,23 @@ function vscodeRange(range: GraphRange): vscode.Range {
     range.end.line,
     range.end.character
   );
+}
+
+/** The target with its selection and definition moved through edits of the file `uri`. */
+function trackTarget(target: TargetSymbol, uri: string, edits: readonly TrackedEdit[]): TargetSymbol {
+  const selectionRange =
+    target.uri.toString() === uri ? trackRange(target.selectionRange, edits) : undefined;
+  const definition = target.definition;
+  const definitionRange =
+    definition?.uri.toString() === uri ? trackRange(definition.range, edits) : undefined;
+  return selectionRange === undefined && definitionRange === undefined
+    ? target
+    : {
+        ...target,
+        selectionRange: selectionRange ?? target.selectionRange,
+        definition:
+          definitionRange === undefined ? definition : new vscode.Location(definition!.uri, definitionRange)
+      };
 }
 
 export class SymbolDependencyGraphViewProvider
@@ -218,6 +237,42 @@ export class SymbolDependencyGraphViewProvider
       return target;
     } finally {
       source.dispose();
+    }
+  }
+
+  /**
+   * Keeps each root on its symbol while its file is edited, so a root click
+   * and the next query use the moved definition. VS Code also reports a
+   * reload from disk of an open file as edits.
+   */
+  public trackEdits(uri: vscode.Uri, edits: readonly TrackedEdit[]): void {
+    if (edits.length === 0) {
+      return;
+    }
+    const key = uri.toString();
+    for (const document of this.documents.values()) {
+      const rootId = document.root?.nodeId;
+      const node = rootId === undefined ? undefined : document.nodes.get(rootId);
+      if (node?.target !== undefined) {
+        node.target = trackTarget(node.target, key, edits);
+      }
+    }
+  }
+
+  /**
+   * Whether a root should take the queried definition: it has none yet, or the
+   * stored one no longer covers its name after a change VS Code did not report.
+   */
+  private async needsQueriedDefinition(target: TargetSymbol): Promise<boolean> {
+    const definition = target.definition;
+    if (definition === undefined) {
+      return true;
+    }
+    try {
+      const document = await vscode.workspace.openTextDocument(definition.uri);
+      return document.getText(definition.range) !== shortSymbolName(target.name);
+    } catch {
+      return false;
     }
   }
 
@@ -467,6 +522,8 @@ export class SymbolDependencyGraphViewProvider
       document.session.isCurrent(generation);
     try {
       const result = await this.references.resolve(target, token);
+      const rebind =
+        node.root && result.definition !== undefined && (await this.needsQueriedDefinition(target));
       if (!owns()) {
         return;
       }
@@ -494,13 +551,8 @@ export class SymbolDependencyGraphViewProvider
       if (!owns()) {
         return;
       }
-      if (
-        node.root &&
-        node.target !== undefined &&
-        node.target.definition === undefined &&
-        result.definition !== undefined
-      ) {
-        node.target = { ...node.target, definition: result.definition };
+      if (rebind && node.target === target) {
+        node.target = { ...target, definition: result.definition };
       }
 
       this.removeDescendants(document, node);

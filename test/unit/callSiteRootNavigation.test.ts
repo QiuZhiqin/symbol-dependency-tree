@@ -1217,3 +1217,30 @@ void own_lock(std::weak_ptr<Holder> weak) { auto locked = weak.lock(); locked->r
     }
   });
 });
+
+describe("root definitions that moved", () => {
+  it("binds a function definition that moved since its target was resolved", async () => {
+    const uri = vscode.Uri.parse("file:///e:/sdt-fixture/moved_root.c");
+    const before = "int moved_fn(int x) { return x; }\nvoid moved_user(void) { moved_fn(1); }\n";
+    fixtures.documents.set(uri.toString(), fixtures.makeDocument(uri, before));
+    const fixtureUris = await vscode.workspace.findFiles("", "");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([...fixtureUris, uri]);
+    const index = await buildIndex();
+    const target = await new SymbolResolver().resolveAt(
+      uri,
+      fixtures.makeDocument(uri, before).positionAt(before.indexOf("moved_fn")),
+      token
+    );
+    expect(target?.definition?.range.start.line).toBe(0);
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const edited = Object.assign(fixtures.makeDocument(uri, `// one\n// two\n${before}`), { isDirty: true, version: 2 });
+    fixtures.documents.set(uri.toString(), edited);
+    index.scheduleDocumentUpdate(edited);
+    await flushUpdates(index);
+    const result = await new ReferenceResolver(index, new QueryCache()).resolve(target!, token);
+
+    expect(result.definition?.range.start.line).toBe(2);
+    expect(result.scopes.map((scope) => scope.name)).toEqual(["moved_user"]);
+  });
+});
