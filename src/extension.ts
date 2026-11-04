@@ -15,6 +15,7 @@ import {
 } from "./services/persistentCallIndex";
 import { QueryCache } from "./services/queryCache";
 import { ReferenceResolver } from "./services/referenceResolver";
+import { createScanPool } from "./services/scanPool";
 import { SymbolResolver } from "./services/symbolResolver";
 import { expandReferenceSelection } from "./utils/sourceSelection";
 
@@ -84,7 +85,8 @@ export function activate(context: vscode.ExtensionContext): SymbolDependencyTree
   const persistentIndex = new PersistentCallIndex(
     context.storageUri ?? context.globalStorageUri,
     output,
-    context.globalStorageUri
+    context.globalStorageUri,
+    createScanPool()
   );
   const indexStatusBar = new PersistentIndexStatusBar(persistentIndex.status());
   const symbolResolver = new SymbolResolver((target, token) =>

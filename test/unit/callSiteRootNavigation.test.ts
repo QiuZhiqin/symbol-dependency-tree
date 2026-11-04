@@ -374,6 +374,7 @@ import {
 import { QueryCache } from "../../src/services/queryCache";
 import { ReferenceResolver } from "../../src/services/referenceResolver";
 import { PersistentCallIndex } from "../../src/services/persistentCallIndex";
+import { inThreadScanner, type FileScanner, type ScanInput } from "../../src/services/scanPool";
 import { SymbolResolver } from "../../src/services/symbolResolver";
 import { TypeLookup } from "../../src/services/typeLookup";
 import type { IndexedFileRecord } from "../../src/model/persistentIndexTypes";
@@ -1391,5 +1392,76 @@ describe("files on the local disk", () => {
     const replace = vi.spyOn(CallIndexDatabase.prototype, "replaceFile");
     await buildIndex();
     expect(replace).not.toHaveBeenCalled();
+  });
+});
+
+describe("scanning and batches", () => {
+  it("scans files through the given scanner and disposes it with the index", async () => {
+    const scanned: ScanInput[] = [];
+    let disposed = false;
+    const scanner: FileScanner = {
+      scan: async (input) => {
+        scanned.push(input);
+        return inThreadScanner.scan(input);
+      },
+      dispose: () => {
+        disposed = true;
+      }
+    };
+    const output = { appendLine: () => undefined, error: () => undefined };
+    const index = new PersistentCallIndex(
+      storage.uri,
+      output as unknown as vscode.OutputChannel,
+      storage.uri,
+      scanner
+    );
+    createdIndexes.push(index);
+    await index.ensureReady(token);
+
+    expect(scanned).toHaveLength(7);
+    expect((index as unknown as MutableIndex).database.definitionsByName("handle_message")).toHaveLength(1);
+    index.dispose();
+    expect(disposed).toBe(true);
+  });
+
+  it("reads no file when the rebuild was cancelled before it started", async () => {
+    const index = newIndex();
+    const stat = vi.spyOn(vscode.workspace.fs, "stat");
+    const read = vi.spyOn(vscode.workspace.fs, "readFile");
+    const cancelled = { isCancellationRequested: true } as vscode.CancellationToken;
+
+    await index.rebuild(cancelled);
+
+    expect(index.status().phase).toBe("cancelled");
+    expect(stat).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("keeps the committed index when a later file fails to read after earlier ones were written", async () => {
+    const index = await buildIndex();
+    const before = index.stats();
+    const extra = Array.from({ length: 30 }, (_, number) =>
+      vscode.Uri.parse(`file:///e:/sdt-fixture/batch_${number}.c`)
+    );
+    for (const [number, uri] of extra.entries()) {
+      fixtures.documents.set(uri.toString(), fixtures.makeDocument(uri, `void batch_fn_${number}(void) {}\n`));
+    }
+    const fixtureUris = await vscode.workspace.findFiles("", "");
+    vi.spyOn(vscode.workspace, "findFiles").mockResolvedValue([...fixtureUris, ...extra]);
+    const readFile = vscode.workspace.fs.readFile;
+    vi.spyOn(vscode.workspace.fs, "readFile").mockImplementation(async (uri) => {
+      if (uri.toString() === extra[29]!.toString()) {
+        throw new Error("simulated read failure in the last batch");
+      }
+      return readFile(uri);
+    });
+
+    const replace = vi.spyOn(CallIndexDatabase.prototype, "replaceFile");
+
+    // The first 36 of 37 files are written into the transaction before the last one fails.
+    await expect(index.rebuild(token)).rejects.toThrow("simulated read failure in the last batch");
+    expect(replace.mock.calls.map(([record]) => record.uri)).toContain(extra[0]!.toString());
+    expect(index.stats()).toEqual(before);
+    expect((index as unknown as MutableIndex).database.definitionsByName("batch_fn_0")).toHaveLength(0);
   });
 });

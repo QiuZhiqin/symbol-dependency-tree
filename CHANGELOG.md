@@ -11,6 +11,7 @@
 - Check and read local files directly instead of through VS Code's file service, so reopening a large workspace no longer waits several seconds before queries run, and a full rebuild takes about a third less time.
 - Truncate the database's write-ahead log after each update, so a rebuild no longer leaves a log as large as the index on disk until the window closes.
 - Log how long listing, reading and scanning, writing, committing, and publishing took whenever the index becomes ready.
+- Scan files on up to two worker threads during rebuilds, startup checks, and workspace-folder updates while the extension host writes the index in file order. A full rebuild of a 21,000-file workspace takes about half as long, with shorter pauses of the extension host. Idle workers stop after 30 seconds.
 
 ## 0.11.0
 

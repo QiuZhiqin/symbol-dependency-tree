@@ -8,11 +8,10 @@ import {
   type ScopeReference,
   type TargetSymbol
 } from "../model/symbolTypes";
-import type { IndexedFileRecord, StoredCallSite } from "../model/persistentIndexTypes";
+import type { IndexedFileRecord } from "../model/persistentIndexTypes";
 import {
   scanCallIndexFile,
-  type IndexedFunctionDefinition,
-  type ScannedCallIndexFile
+  type IndexedFunctionDefinition
 } from "../utils/callIndexScanner";
 import type {
   IndexedMemberOwnerPath,
@@ -39,9 +38,17 @@ import {
   type IndexedDefinitionWithFile,
   type StoredFileState
 } from "./callIndexDatabase";
+import { storedCallSites } from "./fileContent";
+import { inThreadScanner, type FileScanner, type ScanInput } from "./scanPool";
 import { memberTypeKey, TypeLookup } from "./typeLookup";
 
-const updateConcurrency = 12;
+/**
+ * Files between progress reports, cancellation checks and yields while files
+ * are written; each yield lets the scan workers' results in and new files out.
+ */
+const filesPerStep = 4;
+/** Files read and scanned ahead of the one being written. */
+const filesInFlight = 48;
 const bytesPerMegabyte = 1024 * 1024;
 
 type FileChanges = Map<string, IndexedFileRecord | undefined>;
@@ -70,6 +77,10 @@ interface StageTimings {
 
 function newStageTimings(): StageTimings {
   return { list: 0, prepare: 0, write: 0, commit: 0, publish: 0 };
+}
+
+function formatStageTimings(timings: StageTimings): string {
+  return `list ${timings.list} ms, stat/read/scan ${timings.prepare} ms, write ${timings.write} ms, commit ${timings.commit} ms, publish ${timings.publish} ms`;
 }
 
 /** What one file needs in the write transaction, decided before anything is written. */
@@ -159,9 +170,9 @@ function maxIndexedFileBytes(): number {
 }
 
 /**
- * Local files are read with Node directly: VS Code's file service costs a
- * round trip per file, about 7 s just to check 9,000 unchanged files when a
- * workspace reopens.
+ * Local files are checked with Node directly (and read by the scanner): VS
+ * Code's file service costs a round trip per file, about 7 s just to check
+ * 9,000 unchanged files when a workspace reopens.
  */
 async function statFile(uri: vscode.Uri): Promise<StoredFileState> {
   if (uri.scheme !== "file") {
@@ -172,12 +183,6 @@ async function statFile(uri: vscode.Uri): Promise<StoredFileState> {
   // VS Code's file service reports this same rounded value, so files it
   // recorded are not seen as changed.
   return { mtime: stat.mtime.getTime(), size: stat.size };
-}
-
-async function readFileText(uri: vscode.Uri): Promise<string> {
-  const bytes =
-    uri.scheme === "file" ? await fs.readFile(uri.fsPath) : await vscode.workspace.fs.readFile(uri);
-  return Buffer.from(bytes).toString("utf8");
 }
 
 function configurationGlobs(): { include: string; exclude: string } {
@@ -202,14 +207,6 @@ function isIndexedUri(uri: vscode.Uri): boolean {
   );
 }
 
-function chunks<T>(values: readonly T[], size: number): T[][] {
-  const result: T[][] = [];
-  for (let index = 0; index < values.length; index += size) {
-    result.push(values.slice(index, index + size));
-  }
-  return result;
-}
-
 function callableKind(kind: vscode.SymbolKind): boolean {
   return (
     kind === vscode.SymbolKind.Function ||
@@ -217,36 +214,6 @@ function callableKind(kind: vscode.SymbolKind): boolean {
     kind === vscode.SymbolKind.Constructor ||
     kind === vscode.SymbolKind.Operator
   );
-}
-
-/**
- * The scanner's references, each tied to the index of its caller definition.
- * Two definitions found at one name position (gmock's template template
- * parameter `template <class> class MatcherImpl` is read as a class twice)
- * share a caller index, so the same reference is kept once.
- */
-function storedCallSites(scanned: ScannedCallIndexFile): StoredCallSite[] {
-  const callerIndexes = new Map(
-    scanned.definitions.map((definition, index) => [definition.selectionStart, index])
-  );
-  const storedCalls = new Set<string>();
-  return scanned.calls.flatMap((call) => {
-    const callerIndex = callerIndexes.get(call.callerSelectionStart);
-    const key = `${call.callee}\u0000${callerIndex}\u0000${call.offset}`;
-    if (callerIndex === undefined || storedCalls.has(key)) {
-      return [];
-    }
-    storedCalls.add(key);
-    return [{
-      callee: call.callee,
-      offset: call.offset,
-      kind: call.kind,
-      scope: call.scope,
-      memberOwnerPath: call.memberOwnerPath,
-      implicitMemberOwner: call.implicitMemberOwner,
-      callerIndex
-    }];
-  });
 }
 
 /**
@@ -386,11 +353,13 @@ export class PersistentCallIndex implements vscode.Disposable {
   /**
    * @param storageUri local directory that holds the index database
    * @param legacyStorageUri global storage that older versions used when no folder was open
+   * @param scanner scans files for the index; the index disposes it
    */
   public constructor(
     private readonly storageUri: vscode.Uri,
     private readonly output: vscode.OutputChannel,
-    private readonly legacyStorageUri: vscode.Uri = storageUri
+    private readonly legacyStorageUri: vscode.Uri = storageUri,
+    private readonly scanner: FileScanner = inThreadScanner
   ) {
     const { include } = configurationGlobs();
     this.watcher = vscode.workspace.createFileSystemWatcher(include);
@@ -454,6 +423,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     this.workspaceFolderChanges.dispose();
     this.changes.dispose();
     this.statusChanges.dispose();
+    this.scanner.dispose();
     this.database?.close();
     this.database = undefined;
   }
@@ -1009,38 +979,64 @@ export class PersistentCallIndex implements vscode.Disposable {
   }
 
   /**
-   * Writes one batch into the open transaction only after every file in it has
-   * settled, so a failed read can never leave a later write behind its rollback.
+   * Reads, scans and writes `uris` in order. Files are read and scanned up to
+   * a window ahead of the one being written, so scanning continues while the
+   * extension host's thread writes. A file is written only after it settled,
+   * and the first failure ends the run before any later file is written, so a
+   * failed read never leaves a later write behind its rollback.
+   * Returns false when `progress.stopped()` ends it.
    */
-  private async writeBatch(
+  private async writeFiles(
     database: CallIndexDatabase,
     uris: readonly vscode.Uri[],
     force: boolean,
     publication: PendingPublication,
     skipped: { files: number; bytes: number },
-    timings: StageTimings = newStageTimings()
-  ): Promise<void> {
-    let started = Date.now();
-    const settled = await Promise.allSettled(
-      uris.map((uri) => this.prepareFile(uri, force, skipped))
-    );
-    timings.prepare += Date.now() - started;
-    const prepared: PreparedFile[] = [];
-    for (const result of settled) {
-      if (result.status === "rejected") {
-        throw result.reason;
+    timings: StageTimings,
+    progress: { stopped(): boolean; written(processedFiles: number): void }
+  ): Promise<boolean> {
+    const pending: Promise<PreparedFile>[] = [];
+    let queued = 0;
+    const fill = (): void => {
+      while (queued < uris.length && pending.length < filesInFlight) {
+        const prepared = this.prepareFile(uris[queued++]!, force, skipped);
+        // A file still being read when an earlier one fails or the run is
+        // cancelled is never awaited; its own failure needs no report.
+        prepared.catch(() => undefined);
+        pending.push(prepared);
       }
-      prepared.push(result.value);
+    };
+    // A run cancelled before its first file starts no reads or scans.
+    if (progress.stopped()) {
+      return false;
     }
-    started = Date.now();
-    for (const file of prepared) {
+    fill();
+    for (let index = 0; index < uris.length; index += 1) {
+      if (index > 0 && index % filesPerStep === 0) {
+        if (progress.stopped()) {
+          return false;
+        }
+        progress.written(index);
+        // Let worker results, queries and the UI in between longer runs of
+        // writes; the reads and scans they finish count as preparing files.
+        const yielded = Date.now();
+        await new Promise((resolve) => setImmediate(resolve));
+        timings.prepare += Date.now() - yielded;
+      }
+      let started = Date.now();
+      const file = await pending.shift()!;
+      timings.prepare += Date.now() - started;
+      fill();
+      started = Date.now();
       if (file.kind === "remove") {
         this.deleteRecord(database, file.key, publication);
       } else if (file.kind === "write") {
         this.writeRecord(database, file.record, publication);
       }
+      timings.write += Date.now() - started;
     }
-    timings.write += Date.now() - started;
+    progress.written(uris.length);
+    return true;
   }
 
   private reportSkippedFiles(skipped: { files: number; bytes: number }): void {
@@ -1106,20 +1102,19 @@ export class PersistentCallIndex implements vscode.Disposable {
         }
       }
       timings.write += Date.now() - stageStarted;
-      for (const batch of chunks(uris, updateConcurrency)) {
-        if (stopIfCancelled()) {
-          return;
+      const completed = await this.writeFiles(database, uris, force, publication, skipped, timings, {
+        stopped: stopIfCancelled,
+        written: (processed) => {
+          processedFiles = processed;
+          this.setStatus({
+            phase: "building",
+            stats: previousStats,
+            processedFiles,
+            totalFiles: uris.length
+          });
         }
-        await this.writeBatch(database, batch, force, publication, skipped, timings);
-        processedFiles += batch.length;
-        this.setStatus({
-          phase: "building",
-          stats: previousStats,
-          processedFiles,
-          totalFiles: uris.length
-        });
-      }
-      if (stopIfCancelled()) {
+      });
+      if (!completed || stopIfCancelled()) {
         return;
       }
       if (force || rootsChanged) {
@@ -1142,7 +1137,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     const stats = this.stats();
     this.setStatus({ phase: "ready", stats });
     this.output.appendLine(
-      `Persistent call index ready: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls in ${Date.now() - started} ms (list ${timings.list} ms, stat/read/scan ${timings.prepare} ms, write ${timings.write} ms, commit ${timings.commit} ms, publish ${timings.publish} ms)`
+      `Persistent call index ready: ${stats.files} files, ${stats.functions} functions, ${stats.calls} calls in ${Date.now() - started} ms (${formatStageTimings(timings)})`
     );
     if (contentChanged) {
       this.changes.fire();
@@ -1150,41 +1145,21 @@ export class PersistentCallIndex implements vscode.Disposable {
   }
 
   private async indexFile(uri: vscode.Uri, stat: StoredFileState): Promise<IndexedFileRecord> {
-    return this.indexSource(uri, await readFileText(uri), stat.mtime, stat.size);
+    // The scanner reads local files itself, off the extension host's thread.
+    const input: ScanInput =
+      uri.scheme === "file"
+        ? { path: uri.fsPath }
+        : { text: Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8") };
+    return this.indexInput(uri, input, stat.mtime, stat.size);
   }
 
-  private indexSource(
+  private async indexInput(
     uri: vscode.Uri,
-    source: string,
+    input: ScanInput,
     mtime: number,
     size: number
-  ): IndexedFileRecord {
-    const scanned = scanCallIndexFile(source);
-    const indexed: IndexedFileRecord = {
-      uri: uri.toString(),
-      mtime,
-      size,
-      definitions: scanned.definitions,
-      memberTypes: scanned.declarations.flatMap((declaration) =>
-        declaration.scope.kind === "member" &&
-        declaration.typeName !== undefined
-          ? [{
-              owner: declaration.scope.owner,
-              member: declaration.name,
-              typeName: declaration.typeName
-            }]
-          : []
-      ),
-      inheritances: scanned.inheritances,
-      objectTypes: scanned.objectTypes.map((objectType) => ({
-        name: objectType.name,
-        typeName: objectType.typeName
-      })),
-      virtualMembers: scanned.virtualMembers,
-      // Local references are scanned from the current document at query time.
-      calls: storedCallSites(scanned).filter((call) => call.scope?.kind !== "local")
-    };
-    return indexed;
+  ): Promise<IndexedFileRecord> {
+    return { uri: uri.toString(), mtime, size, ...(await this.scanner.scan(input)) };
   }
 
   private async updateWorkspaceFolders(
@@ -1193,6 +1168,8 @@ export class PersistentCallIndex implements vscode.Disposable {
     const started = Date.now();
     const database = this.requireDatabase();
     const { include, exclude } = configurationGlobs();
+    const timings = newStageTimings();
+    let stageStarted = Date.now();
     const addedUris = (
       await Promise.all(
         event.added.map((folder) =>
@@ -1203,11 +1180,11 @@ export class PersistentCallIndex implements vscode.Disposable {
         )
       )
     ).flat();
-    let processedFiles = 0;
+    timings.list = Date.now() - stageStarted;
     this.setStatus({
       phase: "building",
       stats: this.stats(),
-      processedFiles,
+      processedFiles: 0,
       totalFiles: addedUris.length,
       detail: "Updating workspace folders"
     });
@@ -1217,31 +1194,38 @@ export class PersistentCallIndex implements vscode.Disposable {
     const rootsChanged = !sameValues(this.persistedRoots, roots);
     database.begin();
     try {
+      stageStarted = Date.now();
       for (const key of this.fileStates.keys()) {
         if (vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(key)) === undefined) {
           this.deleteRecord(database, key, publication);
         }
       }
-      for (const batch of chunks(addedUris, updateConcurrency)) {
-        await this.writeBatch(database, batch, false, publication, skipped);
-        processedFiles += batch.length;
-        this.setStatus({
-          phase: "building",
-          stats: this.stats(),
-          processedFiles,
-          totalFiles: addedUris.length,
-          detail: "Updating workspace folders"
-        });
-      }
+      timings.write += Date.now() - stageStarted;
+      await this.writeFiles(database, addedUris, false, publication, skipped, timings, {
+        stopped: () => false,
+        written: (processedFiles) => {
+          this.setStatus({
+            phase: "building",
+            stats: this.stats(),
+            processedFiles,
+            totalFiles: addedUris.length,
+            detail: "Updating workspace folders"
+          });
+        }
+      });
       if (rootsChanged) {
         database.setRoots(roots);
       }
+      stageStarted = Date.now();
       database.commit();
+      timings.commit = Date.now() - stageStarted;
     } catch (error) {
       database.rollback();
       throw error;
     }
+    stageStarted = Date.now();
     this.publish(database, publication);
+    timings.publish = Date.now() - stageStarted;
     this.persistedRoots = roots;
     this.reportSkippedFiles(skipped);
     if (publication.states.size > 0 || rootsChanged) {
@@ -1250,7 +1234,7 @@ export class PersistentCallIndex implements vscode.Disposable {
     const stats = this.stats();
     this.setStatus({ phase: "ready", stats });
     this.output.appendLine(
-      `Workspace-folder index update ready: ${event.added.length} added roots, ${event.removed.length} removed roots, ${stats.files} files in ${Date.now() - started} ms`
+      `Workspace-folder index update ready: ${event.added.length} added roots, ${event.removed.length} removed roots, ${stats.files} files in ${Date.now() - started} ms (${formatStageTimings(timings)})`
     );
   }
 
@@ -1387,9 +1371,9 @@ export class PersistentCallIndex implements vscode.Disposable {
         return;
       }
       const stat = await statFile(uri);
-      const indexed = this.indexSource(
+      const indexed = await this.indexInput(
         uri,
-        source,
+        { text: source },
         document.isDirty ? -document.version : stat.mtime,
         byteLength
       );
