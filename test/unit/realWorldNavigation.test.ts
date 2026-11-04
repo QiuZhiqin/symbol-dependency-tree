@@ -2,14 +2,13 @@
 // fakes to keep the fixture readable.
 /* eslint-disable @typescript-eslint/explicit-function-return-type */
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 
-// Real-world regression check: runs the full navigation chain against the
-// actual prplMesh/libvbss/mtk7990k sources — the call to the free function
-// vbss_if_get_sta_entry inside ApManager::handle_vbss_security_request, with
-// two same-name definitions in the index (the 4-arg facade and the 3-arg
-// mt7990 implementation). The vi.mock factory is hoisted, so all setup —
-// including reading the real files — happens inside it.
+// Opt-in real-source regression: SDT_REAL_SOURCE_DIR contains the six flat
+// fixture files listed below. The navigation check distinguishes a 4-argument
+// facade from a same-name 3-argument backend. The vi.mock factory is hoisted,
+// so file loading must also be disabled when the test is skipped.
 
 vi.mock("vscode", () => {
   class MockPosition {
@@ -64,28 +63,17 @@ vi.mock("vscode", () => {
     return mockUri(value);
   };
 
-  const realRoot =
-    "E:/qiuzhiqin/code/ct-dbus_fttr_r388393_20260806_multista/source/compatible_branch/component";
-  const realFiles: ReadonlyArray<[string, string]> = [
-    [
+  const realRoot = process.env["SDT_REAL_SOURCE_DIR"];
+  const realFiles = realRoot
+    ? [
       "ap_manager.cpp",
-      `${realRoot}/romfs/application/mesh/prplmesh_skyworth/sys/prplMesh/agent/src/beerocks/fronthaul_manager/ap_manager/ap_manager.cpp`
-    ],
-    [
       "ap_manager.h",
-      `${realRoot}/romfs/application/mesh/prplmesh_skyworth/sys/prplMesh/agent/src/beerocks/fronthaul_manager/ap_manager/ap_manager.h`
-    ],
-    ["vbss_interface.c", `${realRoot}/romfs/lib/libvbss/source/vbss_interface.c`],
-    ["vbss_interface.h", `${realRoot}/romfs/lib/libvbss/include/vbss_interface.h`],
-    [
+      "vbss_interface.c",
+      "vbss_interface.h",
       "son_slave_thread.cpp",
-      `${realRoot}/romfs/application/mesh/prplmesh_skyworth/sys/prplMesh/agent/src/beerocks/slave/son_slave_thread.cpp`
-    ],
-    [
-      "vbss_interface_impl_mt7990.c",
-      `${realRoot}/kmodule/mtk7990k_mesh/vbss/vbss_interface_impl_mt7990.c`
-    ]
-  ];
+      "vbss_interface_impl.c"
+    ].map((name) => [name, join(realRoot, name)] as const)
+    : [];
 
   function makeDocument(uri: MockUri, text: string) {
     const starts = [0];
@@ -236,7 +224,7 @@ const fixtures = (vscode as unknown as {
   };
 }).__test;
 
-describe("real-world vbss_if_get_sta_entry navigation", () => {
+describe.skipIf(!process.env["SDT_REAL_SOURCE_DIR"])("real-world vbss_if_get_sta_entry navigation", () => {
   it("binds the 4-argument facade from a call inside a member function", async () => {
     const output = { appendLine: () => undefined, error: () => undefined };
     const storage = createTempStorage();

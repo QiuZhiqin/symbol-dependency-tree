@@ -5,3 +5,4 @@ out-test/
 .vscode-test/
 coverage/
 .symbol-dependency-tree/
+.codegraph/

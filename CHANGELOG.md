@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.2
 
 - Speed up caller queries for names that many types share, such as generated `class_swap` members: the virtual-dispatch lookups are built once after the types change instead of for every compared candidate.
 - Find member callers through `std::shared_ptr`, `std::unique_ptr` and `std::weak_ptr` receivers, including `auto p = m_task.lock()`, `std::make_shared<T>()` and `auto` results whose chain starts at a class member or a typed local. `p.reset()` and the smart pointer's other own members are not taken as calls to the pointee.

@@ -51,6 +51,7 @@ You normally do not need to rebuild the entire index. Use **Rebuild C/C++ Symbol
 - Callback tables and function-pointer assignments
 - Struct or class member callbacks such as `ctx->ops->callback()`
 - Virtual calls through a base-class pointer and matching derived overrides
+- Member calls through `std::shared_ptr`, `std::unique_ptr`, and `std::weak_ptr`, including `auto p = m_task.lock(); p->run();` and `std::make_shared<T>()`
 - Same-name definitions in different files matched by their call-site argument counts, for example a multi-argument facade next to a platform-specific implementation
 - Structs, classes, unions, and enums used in parameters, return values, members, and local declarations
 - Variables, enum values, object-like macros, and other identifiers referenced inside function bodies
@@ -72,7 +73,16 @@ Use `symbolDependencyTree.persistentIndex.fileExtensions` to choose which source
 
 Use `symbolDependencyTree.persistentIndex.maxFileSizeMB` to skip very large files such as generated register headers and data tables. Files larger than 4 MB are skipped by default; set it to `0` to index every file.
 
-The index is a SQLite database in VS Code's storage for the current workspace, outside the source tree, so it needs no `.gitignore` entry. Earlier versions kept a `.symbol-dependency-tree` directory under the first workspace folder; the extension removes those old index files after it has built the new database. The index requires VS Code 1.101 or newer.
+## Index Storage
+
+The index is a SQLite database (`call-index-<hash>.sqlite`) in VS Code's storage for the current workspace, outside the source tree, so it needs no `.gitignore` entry. It uses the `node:sqlite` module built into VS Code 1.101 or newer.
+
+- Calls are read from the database for each query, so a large workspace does not keep the whole index in memory. References to local variables and parameters are not stored; they are found by scanning the current file when queried, so they also follow unsaved edits.
+- When the workspace is reopened, the saved index is reused and only files whose size or modification time changed are rescanned.
+- A rebuild is written in a single transaction. Cancelling it keeps the previous index.
+- Each time the index becomes ready, the **Symbol Dependency Tree** output channel logs how long listing, reading and scanning, and writing took.
+- After an extension update that changes the index format, or if the database file is damaged, the old index is discarded and the workspace is rescanned once automatically.
+- Earlier versions kept a `.symbol-dependency-tree` directory under the first workspace folder; the extension removes those old index files after it has built the new database.
 
 The index stays on your machine. The extension does not depend on CodeGraph and does not upload source code.
 
@@ -88,4 +98,7 @@ The index stays on your machine. The extension does not depend on CodeGraph and 
 - Complex macro expansion, token concatenation, and conditional compilation can hide some references.
 - Function pointers passed through several functions, advanced template instantiation, and macro-generated declarations may not be fully resolved.
 - Same-named global functions and C++ overloads with identical parameter counts can be merged in some cases; definitions with different argument counts are matched by arity. File-local `static` functions remain separate.
+- Smart-pointer type aliases such as `using TaskPtr = std::shared_ptr<T>`, copies such as `auto p = m_task;`, and call results used directly as receivers such as `m_task.lock()->run()` are not followed. Calls to pointee members that share a name with smart-pointer members, such as `p->reset()`, are not counted as calls to the pointee.
+- A member declaration whose nested template ends in `>>`, such as `std::vector<std::shared_ptr<T>> m_tasks;`, is not recorded; writing `> >` works.
+- If a file changes outside VS Code while it is closed, a root node for a struct, variable, macro, or same-file overload can still open its old line; generate the tree again from the definition.
 - The extension uses lightweight C/C++ source analysis rather than a complete Clang compilation model.
