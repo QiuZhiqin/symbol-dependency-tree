@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { scanFileContent, type FileContent } from "../../src/services/fileContent";
+import { packCallSites, scanFileContent, type FileContent } from "../../src/services/fileContent";
 import {
   inThreadScanner,
   ScanPool,
@@ -31,7 +31,11 @@ class FakeWorker extends EventEmitter implements ScanWorker {
 }
 
 function content(name: string): FileContent {
-  return { definitions: [], calls: [], memberTypes: [{ owner: name, member: "member", typeName: "type" }] };
+  return {
+    definitions: [],
+    calls: packCallSites([]),
+    memberTypes: [{ owner: name, member: "member", typeName: "type" }]
+  };
 }
 
 let workers: FakeWorker[];

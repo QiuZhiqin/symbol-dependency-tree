@@ -1,8 +1,10 @@
 import { mkdirSync, rmSync } from "node:fs";
 import * as path from "node:path";
 import type { DatabaseSync, SQLOutputValue, StatementSync } from "node:sqlite";
+import { callFields } from "../model/persistentIndexTypes";
 import type {
   IndexedFileRecord,
+  PackedCallSites,
   StoredCallSite,
   StoredInheritance,
   StoredMemberType,
@@ -474,39 +476,20 @@ export class CallIndexDatabase {
     const existing = optionalNumber(this.write.fileId.get(record.uri)?.["id"]);
     const previous = existing === undefined ? undefined : this.deleteFileRows(existing);
     const functions = record.definitions.filter((definition) => definition.kind === "function").length;
+    const calls = record.calls.rows.length / callFields;
     let fileId: number;
     if (existing === undefined) {
       fileId = Number(
-        this.write.insertFile.run(record.uri, record.mtime, record.size, functions, record.calls.length)
-          .lastInsertRowid
+        this.write.insertFile.run(record.uri, record.mtime, record.size, functions, calls).lastInsertRowid
       );
     } else {
       fileId = existing;
-      this.write.updateFile.run(record.mtime, record.size, functions, record.calls.length, fileId);
+      this.write.updateFile.run(record.mtime, record.size, functions, calls, fileId);
     }
     record.definitions.forEach((definition, index) => {
       this.write.insertDefinition.run(fileId, index, ...this.definitionValues(definition));
     });
-    const callees = new Set<number>();
-    for (const call of record.calls) {
-      const callee = this.stringId(call.callee);
-      callees.add(callee);
-      this.write.insertCall.run(
-        callee,
-        fileId,
-        call.callerIndex,
-        call.offset,
-        call.kind === "callable" ? 0 : 1,
-        ...this.scopeValues(call.scope),
-        call.memberOwnerPath === undefined
-          ? null
-          : JSON.stringify([call.memberOwnerPath.rootOwner, ...call.memberOwnerPath.members]),
-        call.implicitMemberOwner === undefined ? null : this.stringId(call.implicitMemberOwner)
-      );
-    }
-    for (const callee of callees) {
-      this.write.insertFileCallee.run(fileId, callee);
-    }
+    this.insertCalls(fileId, record.calls);
     const contributions = recordTypeContributions(record);
     for (const memberType of contributions.memberTypes) {
       this.write.insertMemberType.run(
@@ -538,6 +521,34 @@ export class CallIndexDatabase {
       );
     }
     return previous;
+  }
+
+  /** Writes a file's references and its callee list; `PackedCallSites` gives the layout. */
+  private insertCalls(fileId: number, { names, ownerPaths, rows }: PackedCallSites): void {
+    const nameIds = names.map((name) => this.stringId(name));
+    const callees = new Set<number>();
+    for (let row = 0; row < rows.length; row += callFields) {
+      const callee = nameIds[rows[row]!]!;
+      const scopeKind = rows[row + 4]!;
+      const ownerPath = rows[row + 7]!;
+      const implicitOwner = rows[row + 8]!;
+      callees.add(callee);
+      this.write.insertCall.run(
+        callee,
+        fileId,
+        rows[row + 1]!,
+        rows[row + 2]!,
+        rows[row + 3]!,
+        scopeKind < 0 ? null : scopeKind,
+        scopeKind === 0 ? rows[row + 5]! : scopeKind === 1 ? nameIds[rows[row + 5]!]! : null,
+        scopeKind === 0 ? rows[row + 6]! : null,
+        ownerPath < 0 ? null : ownerPaths[ownerPath]!,
+        implicitOwner < 0 ? null : nameIds[implicitOwner]!
+      );
+    }
+    for (const callee of callees) {
+      this.write.insertFileCallee.run(fileId, callee);
+    }
   }
 
   /** Deletes one file and returns the type facts it contributed. */

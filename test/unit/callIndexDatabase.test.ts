@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { IndexedFileRecord } from "../../src/model/persistentIndexTypes";
+import type { IndexedFileRecord, StoredCallSite } from "../../src/model/persistentIndexTypes";
 import {
   openCallIndexDatabase,
   type CallIndexDatabase
 } from "../../src/services/callIndexDatabase";
+import { packCallSites } from "../../src/services/fileContent";
 
 const first = "file:///e:/fixture/first.c";
 const second = "file:///e:/fixture/second.c";
@@ -26,7 +27,7 @@ function record(uri: string, callees: readonly string[]): IndexedFileRecord {
       selectionStart: 0,
       selectionEnd: 6
     }],
-    calls: callees.map((callee, offset) => ({ callee, offset, kind: "callable" as const, callerIndex: 0 })),
+    calls: packCallSites(callees.map((callee, offset) => ({ callee, offset, kind: "callable", callerIndex: 0 }))),
     memberTypes: []
   };
 }
@@ -56,18 +57,23 @@ function files(callee: string): string[] {
   return database.callsByCallee(callee).map((call) => call.file.uri);
 }
 
-/** The callee list kept beside the calls of each file, read through its own connection. */
-async function fileCallees(): Promise<string[]> {
+/** The first column of a query's rows, read through its own connection. */
+async function query(sql: string): Promise<string[]> {
   const { DatabaseSync } = await import("node:sqlite");
   const reader = new DatabaseSync(databasePath, { readOnly: true });
   try {
-    return reader.prepare(
-      `SELECT f.uri || ' ' || s.value AS entry FROM file_callees c
-       JOIN files f ON f.id = c.file JOIN strings s ON s.id = c.callee ORDER BY entry`
-    ).all().map((row) => String(row["entry"]));
+    return reader.prepare(sql).all().map((row) => String(Object.values(row)[0]));
   } finally {
     reader.close();
   }
+}
+
+/** The callee list kept beside the calls of each file. */
+function fileCallees(): Promise<string[]> {
+  return query(
+    `SELECT f.uri || ' ' || s.value AS entry FROM file_callees c
+     JOIN files f ON f.id = c.file JOIN strings s ON s.id = c.callee ORDER BY entry`
+  );
 }
 
 describe("CallIndexDatabase", () => {
@@ -95,6 +101,35 @@ describe("CallIndexDatabase", () => {
     expect(files("new_first")).toEqual([]);
     expect(await fileCallees()).toEqual([`${second} only_second`, `${second} shared`]);
     expect(database.totals()).toEqual({ files: 1, functions: 1, calls: 2 });
+  });
+
+  it("stores every field of a packed reference and numbers names as references first use them", async () => {
+    const calls: StoredCallSite[] = [
+      {
+        callee: "method",
+        offset: 10,
+        kind: "callable",
+        callerIndex: 0,
+        scope: { kind: "member", owner: "Owner" },
+        memberOwnerPath: { rootOwner: "root", members: ["first", "second"] }
+      },
+      { callee: "field", offset: 20, kind: "symbol", callerIndex: 0, implicitMemberOwner: "Owner" },
+      {
+        callee: "variable",
+        offset: 30,
+        kind: "symbol",
+        callerIndex: 0,
+        scope: { kind: "local", functionSelectionStart: 0, declarationOffset: 8 }
+      },
+      { callee: "Owner", offset: 40, kind: "callable", callerIndex: 0 }
+    ];
+    write((db) => db.replaceFile({ ...record(first, []), calls: packCallSites(calls) }));
+
+    expect(calls.map((call) => database.callsByCallee(call.callee).map((found) => found.call)))
+      .toEqual(calls.map((call) => [call]));
+    expect(database.totals()).toEqual({ files: 1, functions: 1, calls: 4 });
+    expect(await query("SELECT value FROM strings ORDER BY id"))
+      .toEqual(["caller", "method", "Owner", "field", "variable"]);
   });
 
   it("clears the callee lists with the calls", async () => {
